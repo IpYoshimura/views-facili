@@ -390,6 +390,72 @@ async function handleAudioApi(req, res) {
   }
 }
 
+// ─── Lookup singolo short da link ────────────────────────────────────────────
+
+async function handleLookupApi(req, res) {
+  res.setHeader('Content-Type', 'application/json');
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const videoId = url.searchParams.get('id');
+  if (!videoId || !/^[\w-]{11}$/.test(videoId)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: 'ID video non valido' }));
+    return;
+  }
+  loadConfig();
+  try {
+    // Fetch snippet + statistics + contentDetails
+    const data = await fetchWithKeyRotation(key =>
+      `https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics,contentDetails&id=${videoId}&key=${key}`
+    );
+    if (!data.items || data.items.length === 0) {
+      res.writeHead(404);
+      res.end(JSON.stringify({ error: 'Video non trovato' }));
+      return;
+    }
+    const v = data.items[0];
+    const snippet = v.snippet || {};
+    const stats = v.statistics || {};
+    const dur = parseDuration(v.contentDetails?.duration || 'PT0S');
+    
+    const views = parseInt(stats.viewCount || '0', 10);
+    const likes = parseInt(stats.likeCount || '0', 10);
+    const comments = parseInt(stats.commentCount || '0', 10);
+    const publishedAt = snippet.publishedAt || new Date().toISOString();
+    
+    const now = Date.now();
+    const publishTime = new Date(publishedAt).getTime();
+    const hoursElapsed = Math.max(0.1, (now - publishTime) / (1000 * 60 * 60));
+    const viewsPerHour = Math.round(views / hoursElapsed);
+    const likeRatio = views > 0 ? (likes / views) * 100 : 0;
+    const commentRatio = views > 0 ? (comments / views) * 100 : 0;
+    const engagementRatio = likeRatio + commentRatio;
+    
+    let rank = 'gray';
+    if (engagementRatio >= 4) rank = 'diamond';
+    else if (engagementRatio >= 2.5) rank = 'gold';
+    else if (engagementRatio >= 2) rank = 'silver';
+    else if (engagementRatio >= 1) rank = 'bronze';
+    
+    const short = {
+      id: videoId,
+      title: snippet.title || '',
+      channelName: snippet.channelTitle || '',
+      thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+      views, likes, comments,
+      viewsPerHour, likeRatio, commentRatio, engagementRatio,
+      publishedAt,
+      duration: dur,
+      rank,
+      url: `https://www.youtube.com/shorts/${videoId}`
+    };
+    res.writeHead(200);
+    res.end(JSON.stringify({ short }));
+  } catch (err) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: err.message }));
+  }
+}
+
 export async function handleApiShorts(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const periodParam = parseInt(url.searchParams.get('period') ?? '7', 10);
@@ -493,6 +559,13 @@ export function getHtml() {
     .btn-audio{background:#1a2a3a;border:1px solid #2a4a6a;border-radius:6px;color:#64b5f6;cursor:pointer;font-size:.82rem;padding:4px 10px;transition:background .15s}
     .btn-audio:hover{background:#1e3a5a}
     .btn-audio.loading{opacity:.6;cursor:wait}
+    .search-bar{display:flex;gap:8px;align-items:center;width:100%;margin-top:8px}
+    .search-bar input{flex:1;background:#2a2a2a;color:#e0e0e0;border:1px solid #3a3a3a;border-radius:6px;padding:8px 12px;font-size:.9rem;outline:none}
+    .search-bar input:focus{border-color:#ff0000}
+    .search-bar input::placeholder{color:#666}
+    .search-bar button{background:#ff0000;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:.9rem;color:#fff;font-weight:600;transition:background .15s;white-space:nowrap}
+    .search-bar button:hover{background:#cc0000}
+    .search-bar button:disabled{opacity:.5;cursor:wait}
     .badge{display:inline-block;border-radius:4px;padding:2px 7px;font-size:.72rem;font-weight:700}
     .badge-arkadia{background:#1a3a5c;color:#64b5f6}
     .badge-holly{background:#3a1a2a;color:#f48fb1}
@@ -533,6 +606,10 @@ export function getHtml() {
     <div class="refresh-info">
       <span id="statsInfo"></span>
       Auto-refresh ogni 5 min &nbsp;|&nbsp; Prossimo: <span class="countdown" id="countdown">5:00</span>
+    </div>
+    <div class="search-bar">
+      <input type="text" id="shortLinkInput" placeholder="Incolla link Short (es. https://youtube.com/shorts/abc123)" />
+      <button id="shortLookupBtn">🔍 Cerca Short</button>
     </div>
   </div>
   <main>
@@ -769,6 +846,8 @@ export function startServer() {
       await handleSavedApi(req, res);
     } else if (req.method === 'GET' && urlPath === '/api/audio') {
       await handleAudioApi(req, res);
+    } else if (req.method === 'GET' && urlPath === '/api/lookup') {
+      await handleLookupApi(req, res);
     } else {
       res.writeHead(404); res.end('Not Found');
     }

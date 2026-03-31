@@ -105,8 +105,9 @@ function attachEvents(){
             +'<div style="flex:1">'
             +'<div style="font-weight:bold;color:#fff;font-size:.95rem">'+esc(t.title)+'</div>'
             +'<div style="color:#aaa;font-size:.85rem">'+esc(t.artist)+'</div>'
-            +'<div style="margin-top:4px;display:flex;gap:8px">'
-            +(t.link ? '<a href="'+t.link+'" target="_blank" style="color:#2196f3;font-size:.75rem;text-decoration:none">🔗 Link</a>' : '')
+            +'<div style="margin-top:4px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+            +'<a href="https://www.youtube.com/results?search_query='+encodeURIComponent(t.title+' '+t.artist)+'" target="_blank" style="color:#f44336;font-size:.75rem;text-decoration:none">▶️ YouTube</a>'
+            +(t.link ? '<a href="'+t.link+'" target="_blank" style="color:#2196f3;font-size:.75rem;text-decoration:none">🔗 Shazam</a>' : '')
             +'<span style="color:#555;font-size:.7rem">via '+esc(t.method || 'shazam')+'</span>'
             +'</div></div></div>'
           ).join('');
@@ -206,5 +207,36 @@ function applyMinViews(){
 minViewsInput.addEventListener('blur',applyMinViews);
 minViewsInput.addEventListener('keydown',function(e){if(e.key==='Enter')applyMinViews();});
 document.getElementById('searchBtn').addEventListener('click',applyMinViews);
+
+// --- Search bar: lookup short by URL ---
+function extractVideoId(input){
+  input=input.trim();
+  var m=input.match(/(?:youtube\.com\/shorts\/|youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+  if(m)return m[1];
+  if(/^[a-zA-Z0-9_-]{11}$/.test(input))return input;
+  return null;
+}
+var lookupBtn=document.getElementById('shortLookupBtn');
+var lookupInput=document.getElementById('shortLinkInput');
+async function doLookup(){
+  var vid=extractVideoId(lookupInput.value);
+  if(!vid){lookupInput.style.border='2px solid #e74c3c';return;}
+  lookupInput.style.border='';
+  lookupBtn.disabled=true;lookupBtn.textContent='⏳ Cerco...';
+  try{
+    await loadSaved();
+    var res=await fetch('/api/lookup?id='+encodeURIComponent(vid));
+    var data=await res.json();
+    if(data.error){alert('Errore: '+data.error);return;}
+    var grid=document.getElementById('grid');
+    grid.innerHTML=buildCard(data.short,false)+grid.innerHTML;
+    attachEvents();
+    lookupInput.value='';
+  }catch(e){alert('Errore di rete.');}
+  finally{lookupBtn.disabled=false;lookupBtn.textContent='🔍 Cerca Short';}
+}
+lookupBtn.addEventListener('click',doLookup);
+lookupInput.addEventListener('keydown',function(e){if(e.key==='Enter')doLookup();});
+
 setInterval(fetchShorts,5*60*1000);
 fetchShorts();
