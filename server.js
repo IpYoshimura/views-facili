@@ -1218,6 +1218,10 @@ export function getHtml() {
 export function startServer() {
   const server = http.createServer(async (req, res) => {
     const urlPath = req.url.split('?')[0];
+    // Aggiungi header no-cache a tutte le risposte
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     if (req.method === 'GET' && urlPath === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(getHtml());
