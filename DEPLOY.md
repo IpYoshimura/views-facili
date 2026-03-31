@@ -2,7 +2,7 @@
 
 ## 🎵 Novità: Riconoscimento Audio Migliorato
 
-Il server ha ricevuto un **upgrade completo del sistema di riconoscimento audio** per risolvere i problemi su Railway:
+Il server ha ricevuto un **upgrade completo del sistema di riconoscimento audio** per risolvere i problemi su Render/Railway:
 
 ### 🚀 Tre strategie di riconoscimento in pipeline:
 
@@ -22,6 +22,31 @@ Il server ha ricevuto un **upgrade completo del sistema di riconoscimento audio*
 
 ---
 
+## ⚠️ Problemi Comuni su Render
+
+### Errore: "Cannot fetch audio from YouTube"
+
+**Cause:**
+1. FFmpeg non trovato → `ffmpeg-location ffmpeg does not exist`
+2. YouTube richiede JS runtime → `No supported JavaScript runtime`
+3. Rate limiting → `HTTP Error 429: Too Many Requests`
+4. Bot check → `Sign in to confirm you're not a bot`
+
+**Soluzioni (già implementate nel latest commit):**
+
+✅ **Dockerfile aggiornato:**
+- FFmpeg installato PRIMA di yt-dlp
+- Deno aggiunto come JS runtime
+- yt-dlp installato DOPO FFmpeg (`/usr/bin/ffmpeg` hardcoded)
+
+✅ **Server.js aggiornato:**
+- Retry logic (3 tentativi) con backoff exponenziale
+- User-Agent header anti-bot
+- Gestione specifica di HTTP 429
+- Fallback a riconoscimento per titolo se yt-dlp fallisce
+
+---
+
 ## 🔧 Installazione
 
 ```bash
@@ -31,39 +56,33 @@ npm install
 ### Dipendenze aggiornate:
 - `node-fetch` per HTTP requests
 - `dotenv` per variabili ambiente
-- Python 3.11+ con ShazamAPI, pydub, yt-dlp (per fallback)
+- Python 3.11+ con ShazamAPI, pydub, yt-dlp
+- FFmpeg + Deno (in Docker)
 
 ---
 
-## 🚢 Deploy su Railway
+## 🚢 Deploy su Render
 
-### Prerequisiti:
-- Account Railway.com
-- Progetto connesso a GitHub (opzionale)
-
-### Opzione 1: Deploy automatico via GitHub
+### Step 1: Fork/Clone dal GitHub
 
 ```bash
-git add .
-git commit -m "Shazam integration: AudD + MusicBrainz pipeline"
-git push origin main
-```
-Railway sincronizzerà automaticamente e depploierà.
-
-### Opzione 2: Deploy via Railway CLI
-
-```bash
-npm install -g @railway/cli
-railway login
-railway link [project-id]
-railway up
+git clone https://github.com/IpYoshimura/views-facili.git
+cd views-facili
 ```
 
----
+### Step 2: Connetti a Render
 
-## 📝 Variabili di Ambiente
+1. Vai su https://render.com
+2. Crea nuovo "Web Service"
+3. Seleziona il repository GitHub
+4. Configura:
+   - **Name**: `youtube-shorts-viewer`
+   - **Environment**: `Docker`
+   - **Plan**: Free (o Starter)
 
-Configura su Railway:
+### Step 3: Configura Variabili di Ambiente
+
+Su Render Dashboard → Environment:
 
 ```
 PORT=3000
@@ -73,9 +92,27 @@ YOUTUBE_API_KEY_3=your_key_3
 FFMPEG_PATH=/usr/bin/ffmpeg
 YTDLP_PATH=yt-dlp
 PYTHON_PATH=python3
-RAILWAY_ENVIRONMENT=production
 NODE_ENV=production
 ```
+
+### Step 4: Deploy
+
+```
+Render deploya automaticamente quando pushate a GitHub
+```
+
+---
+
+## 📝 Variabili di Ambiente
+
+### Obbligatorie:
+- `YOUTUBE_API_KEY` - Almeno una chiave API YouTube
+
+### Consigliate (Render):
+- `PORT=3000`
+- `FFMPEG_PATH=/usr/bin/ffmpeg` ← critica per Render
+- `YTDLP_PATH=yt-dlp`
+- `NODE_ENV=production`
 
 ---
 
@@ -96,18 +133,19 @@ curl "http://localhost:3001/api/audio?id=dQw4w9WgXcQ&title=Never+Gonna+Give+You+
 ```
 User Request (YouTube Short ID)
     ↓
-yt-dlp (Scarica URL audio)
-    ↓
+getAudioUrlFromYoutube() [con retry logic]
+    ├─→ yt-dlp attempt 1 (30s timeout)
+    ├─→ Se HTTP 429: attendi 5s + yt-dlp attempt 2
+    ├─→ Se timeout/error: attendi 2s + yt-dlp attempt 3
+    └─→ Se fallisce: Fallback a recognition-by-title
+    
+    ↓ (Se URL ottenuto)
+    
 recognizeAudioPipeline()
     ├─→ AudD.io API (15s timeout)
-    │   └─→ Se timeout → Tentativo seguente
-    │
-    ├─→ MusicBrainz Search by Title (8s timeout)
-    │   └─→ Se fallisce → Tentativo seguente
-    │
-    └─→ Python Script (60s timeout, backward compat)
-        └─→ Ritorna risultati o errore
-
+    ├─→ MusicBrainz (8s timeout)
+    └─→ Python Script (60s timeout)
+    
     ↓
 Response JSON con tracks
 ```
@@ -116,34 +154,33 @@ Response JSON con tracks
 
 ## 🐛 Troubleshooting
 
-### "Port already in use"
-```bash
-PORT=3002 node server.js
-```
+### Errore: "ffmpeg-location ffmpeg does not exist"
+**Soluzione:** 
+- Render: FFmpeg è installato nel nuovo Dockerfile → rebuild
+- Locale: Installa FFmpeg
+  ```bash
+  # Windows: scaricare da https://ffmpeg.org/download.html
+  # Mac: brew install ffmpeg
+  # Linux: apt-get install ffmpeg
+  ```
 
-### AudD timeout
-Normale quando la connessione è lenta. Il fallback a MusicBrainz/Python gestisce il caso.
+### "HTTP Error 429" su Render
+**Soluzione:**
+- Normale con rate limiting YouTube
+- Server adesso ha retry Logic (3 tentativi)
+- Fallback a riconoscimento per titolo
+- Attendi 5-10 minuti tra request
 
-### MusicBrainz HTTP 400
-Titoli con caratteri speciali vengono ripuliti automaticamente. Non è un errore critico.
+### "No supported JavaScript runtime"
+**Soluzione:**
+- Nuovo Dockerfile include Deno
+- Forza rebuild: `git commit --allow-empty && git push`
 
-### Python script fallisce
-Controlla che ShazamAPI sia installato:
-```bash
-pip list | grep ShazamAPI
-```
-
----
-
-## 📦 Dockerfile
-
-L'immagine Docker include:
-- Python 3.11-slim
-- Node.js 20
-- FFmpeg
-- ShazamAPI + dipendenze Python
-
-Build automatico su Railway ~2min.
+### "Sign in to confirm you're not a bot"
+**Soluzione:**
+- Aggiunti headers User-Agent anti-bot
+- Server adesso ha retry con 3s attesa
+- Se persiste: YouTube blocca yt-dlp da datacenter
 
 ---
 
@@ -165,13 +202,25 @@ MIT
 
 ---
 
-## 👨‍💻 Supporto
+## 👨‍💻 Supporto Render
 
-Se Shazam non funziona su Railway:
+Se continua a non funzionare:
 
-1. Controlla i logs: `railway logs`
-2. Verifica connessione internet da Railway
-3. Riavvia il deployment: `railway restart`
-4. Controlla variabili di ambiente su Dashboard → Variables
+1. **Leggi i log:**
+   ```bash
+   # Render Dashboard → Logs → Service Logs
+   ```
+
+2. **Verifica FFmpeg:**
+   - Render Shell: `which ffmpeg && ffmpeg -version | head -1`
+
+3. **Forza rebuild:**
+   - Render Dashboard → Environment → Clear build cache
+   - Push un commit: `git commit --allow-empty && git push`
+
+4. **Come ultimo rimedio: Cookiesyt-dlp**
+   - Scarica cookies YouTube localmente
+   - Aggiungi `--cookies cookies.txt` in server.js
+   - Carica cookies.txt su Render
 
 Buon deployment! 🚀

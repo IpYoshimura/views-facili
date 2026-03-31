@@ -288,6 +288,90 @@ async function handleSavedApi(req, res) {
   res.writeHead(405); res.end('Method Not Allowed');
 }
 
+// ─── Get Audio URL from YouTube (with retry & anti-bot headers) ─────────────────
+
+async function getAudioUrlFromYoutube(videoUrl, retryCount = 3) {
+  const { execFile } = await import('child_process');
+  const { promisify } = await import('util');
+  const execFileAsync = promisify(execFile);
+
+  for (let attempt = 1; attempt <= retryCount; attempt++) {
+    try {
+      console.log(`📥 yt-dlp attempt ${attempt}/${retryCount} for ${videoUrl.split('/').pop()}...`);
+      
+      const { stdout, stderr } = await execFileAsync(YTDLP, [
+        '--get-url',
+        '-f', 'bestaudio',
+        '--no-playlist',
+        '--no-warnings',
+        '--socket-timeout', '30',
+        '--retries', '5',
+        '--fragment-retries', '5',
+        '-j', // JSON output for fallback parsing
+        videoUrl,
+        '--ffmpeg-location', FFMPEG_PATH,
+        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      ], { 
+        timeout: 45000,
+        maxBuffer: 10 * 1024 * 1024
+      });
+      
+      const lines = stdout.trim().split('\n');
+      if (lines.length > 0) {
+        // Se c'è JSON, parsalo
+        try {
+          const jsonLine = lines[0];
+          if (jsonLine.startsWith('{')) {
+            const data = JSON.parse(jsonLine);
+            if (data.url) return data.url;
+          }
+        } catch (e) {
+          // Fallback a parsing semplice
+          if (lines[0].startsWith('http')) return lines[0];
+        }
+      }
+      
+      // Se stdout è una URL diretta
+      if (stdout.includes('http')) {
+        return stdout.trim().split('\n').find(l => l.startsWith('http'));
+      }
+      
+    } catch (err) {
+      const errorMsg = err.stderr?.toString() || err.message || '';
+      
+      // Log specifico degli errori
+      if (errorMsg.includes('429') || errorMsg.includes('Too Many Requests')) {
+        console.warn(`⚠️  HTTP 429 (rate limit) - attendo prima di retry...`);
+        // Attendi prima di retry
+        if (attempt < retryCount) {
+          await new Promise(r => setTimeout(r, 5000 * attempt));
+          continue;
+        }
+      }
+      
+      if (errorMsg.includes('Sign in to confirm') || errorMsg.includes('bot')) {
+        console.warn(`⚠️  YouTube bot check richiesto`);
+        if (attempt < retryCount) {
+          await new Promise(r => setTimeout(r, 3000));
+          continue;
+        }
+      }
+      
+      if (errorMsg.includes('No supported JavaScript')) {
+        console.warn(`⚠️  Manca JS runtime per yt-dlp`);
+      }
+      
+      console.warn(`Attempt ${attempt} failed: ${errorMsg.substring(0, 200)}`);
+      
+      if (attempt < retryCount) {
+        await new Promise(r => setTimeout(r, 2000 * attempt));
+      }
+    }
+  }
+  
+  return null;
+}
+
 // ─── Audio recognition endpoint (Shazam-like speed) ─────────────────────────
 
 const YTDLP = process.env.YTDLP_PATH || (process.platform === 'win32'
@@ -524,20 +608,33 @@ async function handleAudioApi(req, res) {
   if (!videoId) { res.writeHead(400); res.end(JSON.stringify({ error: 'id mancante' })); return; }
 
   const videoUrl = `https://www.youtube.com/shorts/${videoId}`;
-  const { execFile } = await import('child_process');
-  const { promisify } = await import('util');
-  const execFileAsync = promisify(execFile);
 
-  let audioUrl;
-  try {
-    const { stdout } = await execFileAsync(YTDLP, [
-      '--get-url', '-f', 'bestaudio', '--no-playlist', videoUrl,
-      '--ffmpeg-location', FFMPEG_PATH
-    ], { timeout: 30000 });
-    audioUrl = stdout.trim().split('\n')[0];
-  } catch (err) {
+  // Prova a ottenere URL audio con retry
+  let audioUrl = await getAudioUrlFromYoutube(videoUrl);
+  
+  if (!audioUrl) {
+    console.error('❌ yt-dlp fallito dopo retry - fallback a riconoscimento per titolo');
+    
+    // Fallback: Prova riconoscimento per titolo senza audio
+    if (videoTitle) {
+      const titleResult = await recognizeByTitle(videoTitle);
+      if (titleResult) {
+        res.writeHead(200);
+        res.end(JSON.stringify({
+          recognized: true,
+          tracks: [titleResult],
+          message: `✨ Riconosciuto da titolo (yt-dlp non disponibile)`,
+          source: 'title-fallback'
+        }));
+        return;
+      }
+    }
+    
     res.writeHead(500);
-    res.end(JSON.stringify({ error: 'Impossibile ottenere URL audio: ' + err.message }));
+    res.end(JSON.stringify({ 
+      error: 'Impossibile ottenere URL audio - YouTube richiede autenticazione o rate limiting',
+      tip: 'Prova tra qualche minuto. Puoi usare --cookies-from-browser con yt-dlp locale.'
+    }));
     return;
   }
 
