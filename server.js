@@ -581,6 +581,43 @@ export function getHtml() {
     .btn-holly:hover{background:#4a1a3a}
     .btn-cancel{background:#2a2a2a;color:#aaa;border:1px solid #3a3a3a;border-radius:8px;padding:10px 22px;cursor:pointer;font-size:.95rem;transition:background .15s}
     .btn-cancel:hover{background:#333}
+
+    /* ── Mobile responsive ─────────────────── */
+    @media(max-width:768px){
+      header{padding:10px 12px;gap:10px}
+      header h1{font-size:1.05rem}
+      .tab-btn{padding:5px 12px;font-size:.82rem}
+      .controls{padding:10px 12px;gap:10px;flex-direction:column;align-items:stretch}
+      .period-group{flex-wrap:wrap;gap:6px}
+      .btn-period{padding:5px 10px;font-size:.82rem}
+      .views-group{width:100%}
+      .views-group input{flex:1;width:auto}
+      .refresh-info{margin-left:0;text-align:center;font-size:.75rem}
+      .search-bar{flex-direction:column}
+      .search-bar input{width:100%}
+      .search-bar button{width:100%}
+      main{padding:10px}
+      .grid{grid-template-columns:repeat(2,1fr);gap:10px}
+      .card-body{padding:8px 10px}
+      .card-title{font-size:.8rem}
+      .card-channel{font-size:.72rem}
+      .card-stats{font-size:.72rem;gap:8px}
+      .card-velocity{font-size:.72rem;padding:4px 6px;gap:8px}
+      .card-date{font-size:.68rem}
+      .card-actions{gap:4px}
+      .btn-save,.btn-copied,.btn-audio,.btn-remove{font-size:.72rem;padding:3px 7px}
+      .rank-badge{font-size:1rem;padding:3px 6px;top:5px;right:5px}
+      .popup{padding:20px 16px;min-width:auto;margin:0 16px}
+      .popup h3{font-size:.95rem}
+      .btn-arkadia,.btn-holly,.btn-cancel{padding:8px 16px;font-size:.85rem}
+      #audioResult{font-size:.82rem}
+    }
+    @media(max-width:420px){
+      .grid{grid-template-columns:1fr}
+      .card-thumb img{aspect-ratio:9/16}
+      header h1{font-size:.95rem}
+      .tab-btn{padding:4px 10px;font-size:.78rem}
+    }
   </style>
 </head>
 <body>
