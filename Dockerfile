@@ -1,4 +1,5 @@
 # ── Lightweight multi-purpose build ──────────────────────────────────────────
+# Build timestamp: 2026-03-31T00:00:00Z (force rebuild)
 FROM node:20-slim
 
 # Installa Python + dipendenze di sistema
