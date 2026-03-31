@@ -1,0 +1,20 @@
+{
+  "name": "youtube-shorts-viewer",
+  "version": "1.0.0",
+  "description": "Tool Node.js per visualizzare YouTube Shorts da canali configurati",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "fast-check": "^3.19.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

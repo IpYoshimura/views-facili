@@ -1,0 +1,14 @@
+.venv/
+.tmp-*/
+__pycache__/
+node_modules/
+.env
+.env.example
+.kiro/
+.vscode/
+.git/
+*.bat
+fpcalc.exe
+audio_recognition.py
+*.pyc
+.gitignore
