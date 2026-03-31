@@ -1026,7 +1026,7 @@ export function getHtml() {
       </div>
     </div>
   </div>
-  <script src="/client.js"></script>
+  <script src="/client.js?v=${Date.now()}"></script>
 </body>
 </html>`;
     let currentTab='feed',savedData={},pendingSave=null;
