@@ -110,6 +110,29 @@ export function getVelocityTrend(vph) {
   return { icon: '📉', label: 'Stagnante', level: 'stalled' };
 }
 
+// Calcola views per hour con decay exponenziale (stile VidIQ)
+export function calculateViewsPerHour(totalViews, publishTimeIso) {
+  const now = Date.now();
+  const publishTime = new Date(publishTimeIso).getTime();
+  const hoursElapsed = Math.max(0.1, (now - publishTime) / (1000 * 60 * 60));
+  
+  // Metodo: simple views/hours per le prime 24h, poi applica decay per ore successive
+  const baseVph = totalViews / hoursElapsed;
+  
+  if (hoursElapsed <= 24) {
+    // Nei primi 24h, usa il calcolo lineare diretto
+    return Math.round(baseVph);
+  }
+  
+  // Dopo 24h, applica fattore di decadimento (il video rallenta nel tempo)
+  // Formula: decay_factor = 1 / (1 + (hours - 24) / 24)
+  // Questo penalizza i video older perché hanno una velocità naturalmente decrescente
+  const excessHours = Math.max(0, hoursElapsed - 24);
+  const decayFactor = 1 / (1 + excessHours / 24);
+  
+  return Math.round(baseVph * decayFactor);
+}
+
 export function parseDuration(duration) {
   const m = duration.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
   if (!m) return 0;
@@ -179,11 +202,8 @@ async function fetchShortsForChannel(handle, cutoffDate, cache) {
       const stats = statsMap[e.videoId];
       if (!stats || stats.duration > 180) continue;
       
-      // Calcola views/ora (dato REALE)
-      const now = Date.now();
-      const publishTime = new Date(e.published).getTime();
-      const hoursElapsed = Math.max(0.1, (now - publishTime) / (1000 * 60 * 60));
-      const viewsPerHour = Math.round(stats.views / hoursElapsed);
+      // Calcola views/ora con decay exponenziale (stile VidIQ)
+      const viewsPerHour = calculateViewsPerHour(stats.views, e.published);
       
       // Calcola rapporti di engagement
       const likeRatio = stats.views > 0 ? (stats.likes / stats.views) * 100 : 0; // %
@@ -249,10 +269,7 @@ async function handleSavedApi(req, res) {
       const item = saved[id];
       if (item.views && item.likes !== undefined && item.comments !== undefined) {
         // Calcola metriche
-        const now = Date.now();
-        const publishTime = new Date(item.publishedAt).getTime();
-        const hoursElapsed = Math.max(0.1, (now - publishTime) / (1000 * 60 * 60));
-        item.viewsPerHour = Math.round(item.views / hoursElapsed);
+        item.viewsPerHour = calculateViewsPerHour(item.views, item.publishedAt);
         item.likeRatio = item.views > 0 ? (item.likes / item.views) * 100 : 0;
         item.commentRatio = item.views > 0 ? (item.comments / item.views) * 100 : 0;
         item.engagementRatio = item.likeRatio + item.commentRatio;
@@ -755,10 +772,7 @@ async function handleLookupApi(req, res) {
     const comments = parseInt(stats.commentCount || '0', 10);
     const publishedAt = snippet.publishedAt || new Date().toISOString();
     
-    const now = Date.now();
-    const publishTime = new Date(publishedAt).getTime();
-    const hoursElapsed = Math.max(0.1, (now - publishTime) / (1000 * 60 * 60));
-    const viewsPerHour = Math.round(views / hoursElapsed);
+    const viewsPerHour = calculateViewsPerHour(views, publishedAt);
     const likeRatio = views > 0 ? (likes / views) * 100 : 0;
     const commentRatio = views > 0 ? (comments / views) * 100 : 0;
     const engagementRatio = likeRatio + commentRatio;
