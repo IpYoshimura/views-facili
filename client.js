@@ -34,18 +34,13 @@ function buildCard(s,forSaved){
   const badges=getBadges(s.id);
   const rankClass = 'card-rank-' + (s.rank || 'gray');
   const rankEmoji = s.rank === 'diamond' ? '💎' : s.rank === 'gold' ? '🥇' : s.rank === 'silver' ? '🥈' : s.rank === 'bronze' ? '🥉' : '⚫';
-  const trendIcon = getTrendIcon(s.viewsPerHour||0);
-  const trendLabel = getTrendLabel(s.viewsPerHour||0);
-  const trendClass = getTrendClass(s.viewsPerHour||0);
-  const vphPrecise = fmtVPH(s.viewsPerHour||0);
   return '<div class="card '+rankClass+(copied?' copied':'')+'" data-id="'+s.id+'">'
     +'<div class="rank-badge">'+rankEmoji+'</div>'
     +'<a class="card-thumb" href="'+url+'" target="_blank" rel="noopener noreferrer"><img src="'+esc(s.thumbnail)+'" alt="" loading="lazy"/></a>'
     +'<div class="card-body">'
     +'<a class="card-title" href="'+url+'" target="_blank" rel="noopener noreferrer">'+esc(s.title)+'</a>'
     +'<div class="card-channel">'+esc(s.channelName)+'</div>'
-    +'<div class="card-stats"><span>👁 '+fmt(s.views)+'</span><span>👍 '+fmt(s.likes)+'</span><span>💬 '+fmt(s.comments||0)+'</span></div>'
-    +'<div class="card-velocity '+trendClass+'"><div class="vph-metric"><span class="vph-icon">'+trendIcon+'</span><span class="vph-value">'+vphPrecise+'</span><span class="vph-unit">views/h</span></div><span class="vph-trend">'+trendLabel+'</span><span class="eng-ratio">📊 '+((s.engagementRatio||0).toFixed(2))+'%</span></div>'
+    +'<div class="card-stats"><span>👁 '+fmt(s.views)+'</span><span>👍 '+fmt(s.likes)+'</span><span>💬 '+fmt(s.comments||0)+'</span><span>📊 '+((s.engagementRatio||0).toFixed(2))+'%</span></div>'
     +'<div class="card-date">'+fmtDate(s.publishedAt)+'</div>'
     +'<div class="card-actions">'
     +'<button class="btn-save'+(saved?' saved':'')+'" data-id="'+s.id+'">'+(saved?'✓ Salvato':'+ Salva')+'</button>'
