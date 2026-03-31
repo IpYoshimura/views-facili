@@ -26,24 +26,29 @@ Il server ha ricevuto un **upgrade completo del sistema di riconoscimento audio*
 
 ### Errore: "Cannot fetch audio from YouTube"
 
-**Cause:**
-1. FFmpeg non trovato → `ffmpeg-location ffmpeg does not exist`
-2. YouTube richiede JS runtime → `No supported JavaScript runtime`
-3. Rate limiting → `HTTP Error 429: Too Many Requests`
-4. Bot check → `Sign in to confirm you're not a bot`
+YouTube **blocca i download da datacenter** (incluso Render) con:
+- ❌ HTTP 429: Too Many Requests
+- ❌ "Sign in to confirm you're not a bot"
+- ❌ FFmpeg not found
+- ❌ No JavaScript runtime
 
-**Soluzioni (già implementate nel latest commit):**
+**Soluzione Implementata (v2):**
 
-✅ **Dockerfile aggiornato:**
-- FFmpeg installato PRIMA di yt-dlp
-- Deno aggiunto come JS runtime
-- yt-dlp installato DOPO FFmpeg (`/usr/bin/ffmpeg` hardcoded)
+✅ **Metodo Ibrido (2-Step Fallback):**
+1. **Invidious API** (Primary) - Proxy pubblico di YouTube
+   - Bypasssa il bot-check
+   - Bypasssa HTTP 429
+   - Funziona da qualsiasi datacenter
+   - Free, no auth, mirror globali
 
-✅ **Server.js aggiornato:**
-- Retry logic (3 tentativi) con backoff exponenziale
-- User-Agent header anti-bot
-- Gestione specifica di HTTP 429
-- Fallback a riconoscimento per titolo se yt-dlp fallisce
+2. **yt-dlp + MusicBrainz** (Fallback) - Per quando Invidious è down
+   - Retry logic (3 tentativi)
+   - Riconoscimento per titolo se tutto fallisce
+
+✅ **Dockerfile Semplificato:**
+- Node.js 20-slim base (più veloce)
+- Python 3 + yt-dlp (fallback)
+- Niente FFmpeg richiesto (usa proxy streaming)
 
 ---
 

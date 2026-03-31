@@ -288,8 +288,53 @@ async function handleSavedApi(req, res) {
   res.writeHead(405); res.end('Method Not Allowed');
 }
 
-// ─── Get Audio URL from YouTube (with retry & anti-bot headers) ─────────────────
+// ─── Get Audio URL from YouTube (Multiple Methods with Fallbacks) ─────────────
 
+// Metodo 1: Invidious API (proxy YouTube, bypassa rate limiting)
+async function getAudioUrlViaInvidious(videoId) {
+  try {
+    // Invidious instances (load balanced)
+    const instances = [
+      'https://inv.riverside.rocks',
+      'https://yewtu.be',
+      'https://invidious.snopyta.org',
+      'https://invidious.kavin.rocks',
+    ];
+    
+    for (const instance of instances) {
+      try {
+        console.log(`📥 Trying Invidious: ${instance}`);
+        const res = await fetch(`${instance}/api/v1/videos/${videoId}`, {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          timeout: 10000
+        });
+        
+        if (!res.ok) continue;
+        const data = await res.json();
+        
+        // Estrai formato audio bestaudio
+        const audioFormats = data.formatStreams?.filter(f => 
+          f.type?.includes('audio') || (f.qualityLabel === 'tiny' && f.container === 'webm')
+        );
+        
+        if (audioFormats?.length > 0) {
+          const audioUrl = audioFormats[0].url;
+          if (audioUrl) {
+            console.log(`✓ Invidious URL found from ${instance}`);
+            return audioUrl;
+          }
+        }
+      } catch (err) {
+        console.warn(`Invidious ${instance} failed: ${err.message?.substring(0, 50)}`);
+      }
+    }
+  } catch (err) {
+    console.warn(`Invidious method failed: ${err.message}`);
+  }
+  return null;
+}
+
+// Metodo 2: yt-dlp con retry (fallback)
 async function getAudioUrlFromYoutube(videoUrl, retryCount = 3) {
   const { execFile } = await import('child_process');
   const { promisify } = await import('util');
@@ -297,7 +342,7 @@ async function getAudioUrlFromYoutube(videoUrl, retryCount = 3) {
 
   for (let attempt = 1; attempt <= retryCount; attempt++) {
     try {
-      console.log(`📥 yt-dlp attempt ${attempt}/${retryCount} for ${videoUrl.split('/').pop()}...`);
+      console.log(`📥 yt-dlp attempt ${attempt}/${retryCount}...`);
       
       const { stdout, stderr } = await execFileAsync(YTDLP, [
         '--get-url',
@@ -307,9 +352,8 @@ async function getAudioUrlFromYoutube(videoUrl, retryCount = 3) {
         '--socket-timeout', '30',
         '--retries', '5',
         '--fragment-retries', '5',
-        '-j', // JSON output for fallback parsing
+        '-j',
         videoUrl,
-        '--ffmpeg-location', FFMPEG_PATH,
         '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       ], { 
         timeout: 45000,
@@ -318,7 +362,6 @@ async function getAudioUrlFromYoutube(videoUrl, retryCount = 3) {
       
       const lines = stdout.trim().split('\n');
       if (lines.length > 0) {
-        // Se c'è JSON, parsalo
         try {
           const jsonLine = lines[0];
           if (jsonLine.startsWith('{')) {
@@ -326,12 +369,10 @@ async function getAudioUrlFromYoutube(videoUrl, retryCount = 3) {
             if (data.url) return data.url;
           }
         } catch (e) {
-          // Fallback a parsing semplice
           if (lines[0].startsWith('http')) return lines[0];
         }
       }
       
-      // Se stdout è una URL diretta
       if (stdout.includes('http')) {
         return stdout.trim().split('\n').find(l => l.startsWith('http'));
       }
@@ -339,35 +380,34 @@ async function getAudioUrlFromYoutube(videoUrl, retryCount = 3) {
     } catch (err) {
       const errorMsg = err.stderr?.toString() || err.message || '';
       
-      // Log specifico degli errori
       if (errorMsg.includes('429') || errorMsg.includes('Too Many Requests')) {
-        console.warn(`⚠️  HTTP 429 (rate limit) - attendo prima di retry...`);
-        // Attendi prima di retry
+        console.warn(`⚠️ HTTP 429 (rate limit)`);
         if (attempt < retryCount) {
           await new Promise(r => setTimeout(r, 5000 * attempt));
           continue;
         }
       }
       
-      if (errorMsg.includes('Sign in to confirm') || errorMsg.includes('bot')) {
-        console.warn(`⚠️  YouTube bot check richiesto`);
-        if (attempt < retryCount) {
-          await new Promise(r => setTimeout(r, 3000));
-          continue;
-        }
-      }
-      
-      if (errorMsg.includes('No supported JavaScript')) {
-        console.warn(`⚠️  Manca JS runtime per yt-dlp`);
-      }
-      
-      console.warn(`Attempt ${attempt} failed: ${errorMsg.substring(0, 200)}`);
-      
       if (attempt < retryCount) {
         await new Promise(r => setTimeout(r, 2000 * attempt));
       }
     }
   }
+  
+  return null;
+}
+
+// Metodo 3: Hybrid function - prova Invidious prima, poi yt-dlp
+async function getAudioUrlHybrid(videoId, videoUrl) {
+  console.log(`🎵 Tentativo ibrido per ${videoId}...`);
+  
+  // Prova 1: Invidious (non bloccato da YouTube)
+  const invidUrl = await getAudioUrlViaInvidious(videoId);
+  if (invidUrl) return invidUrl;
+  
+  // Prova 2: yt-dlp
+  const ytdlUrl = await getAudioUrlFromYoutube(videoUrl);
+  if (ytdlUrl) return ytdlUrl;
   
   return null;
 }
@@ -609,11 +649,11 @@ async function handleAudioApi(req, res) {
 
   const videoUrl = `https://www.youtube.com/shorts/${videoId}`;
 
-  // Prova a ottenere URL audio con retry
-  let audioUrl = await getAudioUrlFromYoutube(videoUrl);
+  // Prova il metodo ibrido (Invidious + yt-dlp)
+  let audioUrl = await getAudioUrlHybrid(videoId, videoUrl);
   
   if (!audioUrl) {
-    console.error('❌ yt-dlp fallito dopo retry - fallback a riconoscimento per titolo');
+    console.error('❌ Tutti i metodi di download falliti - fallback a riconoscimento per titolo');
     
     // Fallback: Prova riconoscimento per titolo senza audio
     if (videoTitle) {
@@ -623,22 +663,24 @@ async function handleAudioApi(req, res) {
         res.end(JSON.stringify({
           recognized: true,
           tracks: [titleResult],
-          message: `✨ Riconosciuto da titolo (yt-dlp non disponibile)`,
-          source: 'title-fallback'
+          message: `✨ Riconosciuto da titolo (download audio non disponibile)`,
+          source: 'title-fallback',
+          tip: 'YouTube ha bloccato il download. Prova tra poco.'
         }));
         return;
       }
     }
     
-    res.writeHead(500);
+    res.writeHead(503);
     res.end(JSON.stringify({ 
-      error: 'Impossibile ottenere URL audio - YouTube richiede autenticazione o rate limiting',
-      tip: 'Prova tra qualche minuto. Puoi usare --cookies-from-browser con yt-dlp locale.'
+      error: '⚠️ Servizi di download YouTube temporaneamente non disponibili',
+      message: 'YouTube sta bloccando i download. Prova tra 5-10 minuti.',
+      tip: 'Tutti i proxy sono bloccati contemporaneamente. Riprova tra poco.'
     }));
     return;
   }
 
-  // Riconoscimento veloce tipo Shazam (usa titolo video se disponibile)
+  // Riconoscimento audio
   const result = await shazamRecognize(audioUrl, videoTitle);
 
   res.writeHead(200);
