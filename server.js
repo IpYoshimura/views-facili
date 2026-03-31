@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import http from 'http';
 import { exec } from 'child_process';
+import fetch from 'node-fetch';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -299,40 +300,218 @@ const PYTHON = process.env.PYTHON_PATH || (process.platform === 'win32'
   ? join(__dirname, '.venv', 'Scripts', 'python.exe')
   : 'python3');
 
+// ─── AudD.io API Recognition (Reliable, No Python Dependency) ──────────────────
+
+async function recognizeAudioViaAudD(audioUrl, videoTitle = '') {
+  try {
+    console.log('🎵 Tentativo 1: AudD.io API (no Python dependency)...');
+    
+    // AudD API unofficial endpoint (free, no auth needed)
+    const params = new URLSearchParams({
+      url: audioUrl,
+      return: 'apple_music,spotify,deezer'
+    });
+    
+    const res = await fetch(`https://api.audd.io/?${params}`, {
+      timeout: 15000
+    });
+    
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    
+    if (data.result) {
+      const result = data.result;
+      return {
+        success: true,
+        results: [{
+          title: result.title || 'Sconosciuto',
+          artist: result.artist || 'Sconosciuto',
+          cover: result.image || '',
+          link: result.apple_music?.url || result.spotify?.external_urls?.spotify || result.deezer?.link || '',
+          method: 'audd'
+        }]
+      };
+    }
+    
+    return { success: false, results: [], message: 'Nessun risultato da AudD' };
+  } catch (err) {
+    console.warn('AudD error:', err.message);
+    return { success: false, results: [], error: err.message };
+  }
+}
+
+// ─── MusicBrainz Fallback (Free API, No Rate Limiting) ─────────────────────
+
+async function queryMusicBrainz(title, artist = '') {
+  try {
+    // Build simple query without special syntax (MusicBrainz Lucene query)
+    const searchTitle = title.replace(/[()[\]{}]/g, '').trim().substring(0, 100);
+    const params = new URLSearchParams({
+      query: searchTitle,
+      type: 'recording',
+      limit: '1',
+      fmt: 'json'
+    });
+    
+    const url = `https://musicbrainz.org/ws/2/recording?${params}`;
+    console.log(`🔍 MusicBrainz query: ${searchTitle.substring(0, 50)}...`);
+    
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'YouTubeShortViewer/1.0' },
+      timeout: 8000
+    });
+    
+    if (!res.ok) {
+      console.warn(`MusicBrainz HTTP ${res.status} for: "${searchTitle}"`);
+      return null;
+    }
+    
+    const data = await res.json();
+    const recordings = data.recordings || [];
+    
+    if (recordings.length > 0) {
+      const rec = recordings[0];
+      const artistName = rec['artist-credit']?.[0]?.artist?.name || 'Sconosciuto';
+      const result = {
+        title: rec.title || 'Sconosciuto',
+        artist: artistName,
+        link: `https://musicbrainz.org/recording/${rec.id}`,
+        method: 'musicbrainz'
+      };
+      console.log(`✓ MusicBrainz found: ${result.title} - ${result.artist}`);
+      return result;
+    }
+  } catch (err) {
+    console.warn(`MusicBrainz error: ${err.message}`);
+  }
+  return null;
+}
+
+// ─── Title-based Recognition Fallback ──────────────────────────────────────
+
+async function recognizeByTitle(videoTitle) {
+  if (!videoTitle) return null;
+  
+  console.log(`🎵 Tentativo 2: Ricerca per titolo video: "${videoTitle}"`);
+  
+  const candidates = [];
+  
+  // Extract text in parentheses
+  const parens = videoTitle.match(/\(([^)]{3,})\)/g) || [];
+  for (const p of parens) {
+    const clean = p.slice(1, -1).trim();
+    if (!['official video', 'official audio', 'lyrics', 'music video', 'audio', 'visualizer'].includes(clean.toLowerCase())) {
+      candidates.push(clean);
+    }
+  }
+  
+  // Extract text after separator
+  for (const sep of [' - ', ' | ', ' — ']) {
+    if (videoTitle.includes(sep)) {
+      const parts = videoTitle.split(sep);
+      for (const part of parts) {
+        const clean = part.trim();
+        if (clean.length > 2 && clean.length < 200) candidates.push(clean);
+      }
+    }
+  }
+  
+  // Remove duplicates
+  const uniqueCandidates = [...new Set(candidates)];
+  
+  for (const candidate of uniqueCandidates) {
+    const result = await queryMusicBrainz(candidate);
+    if (result) return result;
+  }
+  
+  return null;
+}
+
+// ─── Enhanced Recognition Pipeline ────────────────────────────────────────
+
+async function recognizeAudioPipeline(audioUrl, videoTitle = '') {
+  const tracks = [];
+  const seen = new Set();
+  
+  const addTrack = (track) => {
+    const key = `${track.title}_${track.artist}`.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      tracks.push(track);
+    }
+  };
+  
+  // Strategy 1: AudD.io (most reliable, no Python needed)
+  try {
+    const auddResult = await recognizeAudioViaAudD(audioUrl, videoTitle);
+    if (auddResult.success && auddResult.results?.length > 0) {
+      for (const track of auddResult.results) {
+        addTrack(track);
+      }
+      return { success: true, results: tracks, source: 'audd' };
+    }
+  } catch (err) {
+    console.warn('AudD pipeline error:', err.message);
+  }
+  
+  // Strategy 2: Title-based fallback
+  if (!tracks.length) {
+    try {
+      const titleResult = await recognizeByTitle(videoTitle);
+      if (titleResult) {
+        addTrack(titleResult);
+        return { success: true, results: tracks, source: 'title' };
+      }
+    } catch (err) {
+      console.warn('Title recognition error:', err.message);
+    }
+  }
+  
+  return { success: false, results: [], message: 'Audio non riconosciuto' };
+}
+
 async function shazamRecognize(audioUrl, videoTitle = '') {
+  // Try new pipeline first (AudD + Title-based)
+  try {
+    const result = await recognizeAudioPipeline(audioUrl, videoTitle);
+    if (result.success) {
+      return {
+        success: true,
+        results: result.results,
+        source: result.source
+      };
+    }
+  } catch (err) {
+    console.warn('Pipeline error, falling back to Python:', err.message);
+  }
+  
+  // Fallback: Python script (for backward compatibility)
   const { execFile } = await import('child_process');
   const { promisify } = await import('util');
   const execFileAsync = promisify(execFile);
 
   try {
-    console.log(`⚡ Ricerca rapida da titolo video...`);
+    console.log(`⚡ Fallback: Python script...`);
     const { stdout } = await execFileAsync(PYTHON, [
       join(__dirname, 'shazam_recognition_new.py'),
       audioUrl,
       videoTitle
-    ], { timeout: 180000, maxBuffer: 20 * 1024 * 1024 });
+    ], { timeout: 60000, maxBuffer: 20 * 1024 * 1024 });
 
     try {
-      return JSON.parse(stdout);
+      const parsed = JSON.parse(stdout);
+      return parsed;
     } catch (parseErr) {
-      console.warn('JSON parse error from shazam script stdout:', parseErr.message);
-      return { error: 'Impossibile interpretare la risposta di Shazam' };
+      console.warn('Python script JSON parse error:', parseErr.message);
+      return { success: false, message: 'Errore nel parsing della risposta' };
     }
   } catch (err) {
-    // Proviamo comunque a leggere stdout, se presente
-    if (err.stdout) {
-      try {
-        return JSON.parse(err.stdout);
-      } catch (parseErr) {
-        console.warn('JSON parse error from shazam script err.stdout:', parseErr.message);
-      }
-    }
-    console.error(`Errore riconoscimento:`, err.message?.substring(0, 300));
-    // Non mostrare l'intero comando + stderr all'utente
-    const shortMsg = err.killed ? 'Timeout riconoscimento audio' :
-      err.code ? `Processo terminato con codice ${err.code}` :
-      'Errore nel riconoscimento audio';
-    return { error: shortMsg };
+    console.error(`Python fallback failed:`, err.message?.substring(0, 300));
+    return { 
+      success: false, 
+      error: 'Riconoscimento non disponibile',
+      message: 'Tutti i metodi di riconoscimento falliti'
+    };
   }
 }
 
