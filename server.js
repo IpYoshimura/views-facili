@@ -95,6 +95,21 @@ export function formatNumber(n) {
   if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
   return String(n);
 }
+
+export function formatViewsPerHour(vph) {
+  if (!vph || vph < 0) return '0';
+  return Math.round(vph).toLocaleString('it-IT');
+}
+
+export function getVelocityTrend(vph) {
+  if (vph >= 100000) return { icon: '🚀', label: 'Virale', level: 'extreme' };
+  if (vph >= 50000) return { icon: '🔥', label: 'Molto veloce', level: 'hot' };
+  if (vph >= 10000) return { icon: '⚡', label: 'Veloce', level: 'fast' };
+  if (vph >= 1000) return { icon: '📈', label: 'Moderato', level: 'moderate' };
+  if (vph >= 100) return { icon: '📊', label: 'Lento', level: 'slow' };
+  return { icon: '📉', label: 'Stagnante', level: 'stalled' };
+}
+
 export function parseDuration(duration) {
   const m = duration.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
   if (!m) return 0;
@@ -863,7 +878,11 @@ export function getHtml() {
     .card-title:hover{color:#ff0000}
     .card-channel{font-size:.8rem;color:#aaa;margin-bottom:6px}
     .card-stats{display:flex;gap:12px;font-size:.8rem;color:#ccc;flex-wrap:wrap}
-    .card-velocity{display:flex;gap:12px;font-size:.8rem;color:#4caf50;font-weight:600;margin:6px 0;flex-wrap:wrap;background:#0a2a0a;padding:6px 8px;border-radius:4px}
+    .card-velocity{display:flex;align-items:center;gap:10px;font-size:.8rem;margin:8px 0;flex-wrap:wrap;background:#0a2a0a;padding:8px 10px;border-radius:4px;border-left:3px solid #4caf50}
+    .card-velocity.trend-extreme{background:#2a0a0a;border-left-color:#ff6b00}.card-velocity.trend-hot{background:#2a1a0a;border-left-color:#ff4500}.card-velocity.trend-fast{background:#0a2a0a;border-left-color:#ffaa00}.card-velocity.trend-moderate{background:#0a1a0a;border-left-color:#4caf50}.card-velocity.trend-slow{background:#0a0a1a;border-left-color:#ffeb3b}.card-velocity.trend-stalled{background:#0a0a0a;border-left-color:#999}
+    .vph-metric{display:flex;align-items:baseline;gap:4px;font-weight:600;color:#fff}.vph-icon{font-size:1rem}.vph-value{font-size:.95rem;font-weight:700;color:#64b5f6}.vph-unit{font-size:.7rem;color:#aaa;font-weight:400}
+    .vph-trend{padding:2px 6px;background:#1a1a1a;border-radius:3px;font-size:.75rem;color:#aaa;white-space:nowrap}
+    .eng-ratio{font-size:.75rem;color:#4caf50}
     .card-date{font-size:.75rem;color:#777;margin-top:5px;pointer-events:none;user-select:none}
     .card-actions{display:flex;align-items:center;gap:6px;margin-top:10px;flex-wrap:wrap}
     .btn-save{background:#2a2a2a;border:1px solid #3a3a3a;border-radius:6px;color:#ccc;cursor:pointer;font-size:.82rem;padding:4px 10px;transition:background .15s}
@@ -920,7 +939,7 @@ export function getHtml() {
       .card-title{font-size:.8rem}
       .card-channel{font-size:.72rem}
       .card-stats{font-size:.72rem;gap:8px}
-      .card-velocity{font-size:.72rem;padding:4px 6px;gap:8px}
+      .card-velocity{font-size:.68rem;padding:6px 8px;gap:6px}.vph-value{font-size:.85rem}.vph-unit{font-size:.65rem}.vph-trend{font-size:.65rem;padding:1px 4px}
       .card-date{font-size:.68rem}
       .card-actions{gap:4px}
       .btn-save,.btn-copied,.btn-audio,.btn-remove{font-size:.72rem;padding:3px 7px}

@@ -3,6 +3,10 @@ let currentTab='feed',savedData={},pendingSave=null;
 const videoMap={};
 
 function fmt(n){if(n>=1000000)return(n/1000000).toFixed(1)+'M';if(n>=1000)return(n/1000).toFixed(1)+'K';return String(n)}
+function fmtVPH(vph){if(!vph||vph<0)return'0';return Math.round(vph).toLocaleString('it-IT')}
+function getTrendIcon(vph){if(vph>=100000)return'🚀';if(vph>=50000)return'🔥';if(vph>=10000)return'⚡';if(vph>=1000)return'📈';if(vph>=100)return'📊';return'📉'}
+function getTrendLabel(vph){if(vph>=100000)return'Virale';if(vph>=50000)return'Molto veloce';if(vph>=10000)return'Veloce';if(vph>=1000)return'Moderato';if(vph>=100)return'Lento';return'Stagnante'}
+function getTrendClass(vph){if(vph>=100000)return'trend-extreme';if(vph>=50000)return'trend-hot';if(vph>=10000)return'trend-fast';if(vph>=1000)return'trend-moderate';if(vph>=100)return'trend-slow';return'trend-stalled'}
 function fmtDate(iso){const d=new Date(iso);return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear()}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 
@@ -30,7 +34,10 @@ function buildCard(s,forSaved){
   const badges=getBadges(s.id);
   const rankClass = 'card-rank-' + (s.rank || 'gray');
   const rankEmoji = s.rank === 'diamond' ? '💎' : s.rank === 'gold' ? '🥇' : s.rank === 'silver' ? '🥈' : s.rank === 'bronze' ? '🥉' : '⚫';
-  const fireIcon = s.viewsPerHour > 100000 ? '🔥' : '';
+  const trendIcon = getTrendIcon(s.viewsPerHour||0);
+  const trendLabel = getTrendLabel(s.viewsPerHour||0);
+  const trendClass = getTrendClass(s.viewsPerHour||0);
+  const vphPrecise = fmtVPH(s.viewsPerHour||0);
   return '<div class="card '+rankClass+(copied?' copied':'')+'" data-id="'+s.id+'">'
     +'<div class="rank-badge">'+rankEmoji+'</div>'
     +'<a class="card-thumb" href="'+url+'" target="_blank" rel="noopener noreferrer"><img src="'+esc(s.thumbnail)+'" alt="" loading="lazy"/></a>'
@@ -38,7 +45,7 @@ function buildCard(s,forSaved){
     +'<a class="card-title" href="'+url+'" target="_blank" rel="noopener noreferrer">'+esc(s.title)+'</a>'
     +'<div class="card-channel">'+esc(s.channelName)+'</div>'
     +'<div class="card-stats"><span>👁 '+fmt(s.views)+'</span><span>👍 '+fmt(s.likes)+'</span><span>💬 '+fmt(s.comments||0)+'</span></div>'
-    +'<div class="card-velocity"><span>⚡ '+fmt(s.viewsPerHour||0)+'/h'+fireIcon+'</span><span>📊 '+((s.engagementRatio||0).toFixed(2))+'% eng.</span></div>'
+    +'<div class="card-velocity '+trendClass+'"><div class="vph-metric"><span class="vph-icon">'+trendIcon+'</span><span class="vph-value">'+vphPrecise+'</span><span class="vph-unit">views/h</span></div><span class="vph-trend">'+trendLabel+'</span><span class="eng-ratio">📊 '+((s.engagementRatio||0).toFixed(2))+'%</span></div>'
     +'<div class="card-date">'+fmtDate(s.publishedAt)+'</div>'
     +'<div class="card-actions">'
     +'<button class="btn-save'+(saved?' saved':'')+'" data-id="'+s.id+'">'+(saved?'✓ Salvato':'+ Salva')+'</button>'
