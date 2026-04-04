@@ -8,10 +8,89 @@ import fetch from 'node-fetch';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+const DEFAULT_MIN_VIEWS = 1_000_000;
+const DEFAULT_PERIOD_DAYS = 7;
+const DEFAULT_CACHE_COVERAGE_DAYS = 7;
+const RECENT_EXCEPTION_MIN_VIEWS = 800_000;
+const RECENT_EXCEPTION_MAX_HOURS = 24;
+
 // ─── Config con rotazione chiavi ─────────────────────────────────────────────
 
 let _keys = null;
 let _keyIndex = 0;
+const CREDITS_FILE = join(__dirname, 'key_credits.json');
+
+function loadKeyCredits() {
+  if (!existsSync(CREDITS_FILE)) return {};
+  try { return JSON.parse(readFileSync(CREDITS_FILE, 'utf-8')); } catch { return {}; }
+}
+function saveKeyCredits(credits) {
+  try { writeFileSync(CREDITS_FILE, JSON.stringify(credits, null, 2)); } catch (e) { console.error(e.message); }
+}
+
+let lastResetDate = null;
+function checkAndResetCreditsIfMidnight() {
+  const now = new Date();
+  const currentDate = now.getUTCDate();
+  
+  if (lastResetDate !== currentDate) {
+    lastResetDate = currentDate;
+    const keys = [
+      process.env.YOUTUBE_API_KEY,
+      process.env.YOUTUBE_API_KEY_2,
+      process.env.YOUTUBE_API_KEY_3,
+      process.env.YOUTUBE_API_KEY_4,
+      process.env.YOUTUBE_API_KEY_5,
+      process.env.YOUTUBE_API_KEY_6,
+      process.env.YOUTUBE_API_KEY_7,
+      process.env.YOUTUBE_API_KEY_8,
+    ].filter(Boolean);
+    
+    if (keys.length > 0) {
+      const resetCredits = {};
+      for (const key of keys) {
+        resetCredits[key] = 10000;
+      }
+      resetCredits._resetInfo = 'Crediti si resettano ogni giorno a mezzanotte UTC';
+      saveKeyCredits(resetCredits);
+      console.log(`✅ Crediti resettati a 10000 per tutte le ${keys.length} chiavi`);
+    }
+  }
+}
+
+// ─── Tracciamento crediti consumati ───────────────────────────────────────────
+
+let sessionCreditsUsed = 0;
+const CREDITS_COST = {
+  RESOLVE_CHANNEL: 1,
+  GET_UPLOADS_PLAYLIST: 1,
+  LIST_UPLOADS_PAGE: 1,
+  GET_STATS_PER_50: 1
+};
+
+function addCreditsUsed(amount) {
+  sessionCreditsUsed += amount;
+  console.log(`💰 Crediti usati: +${amount} (Sessione: ${sessionCreditsUsed})`);
+}
+
+function resetSessionCredits() {
+  sessionCreditsUsed = 0;
+}
+
+function estimateCreditsForFetch(channelCount, avgVideosPerChannel = 50, periodDays = DEFAULT_PERIOD_DAYS) {
+  const resolveChannelCost = channelCount * CREDITS_COST.RESOLVE_CHANNEL;
+  const uploadsPlaylistCost = channelCount * CREDITS_COST.GET_UPLOADS_PLAYLIST;
+  const playlistPagesPerChannel = getPlaylistPageLimit(periodDays);
+  const playlistItemsCost = channelCount * playlistPagesPerChannel * CREDITS_COST.LIST_UPLOADS_PAGE;
+  const statsCost = Math.ceil((channelCount * avgVideosPerChannel) / 50) * CREDITS_COST.GET_STATS_PER_50;
+  return {
+    resolveChannels: resolveChannelCost,
+    uploadsPlaylists: uploadsPlaylistCost,
+    playlistItems: playlistItemsCost,
+    stats: statsCost,
+    total: resolveChannelCost + uploadsPlaylistCost + playlistItemsCost + statsCost
+  };
+}
 
 export function loadConfig() {
   if (_keys) return _keys[_keyIndex % _keys.length];
@@ -19,6 +98,11 @@ export function loadConfig() {
     process.env.YOUTUBE_API_KEY,
     process.env.YOUTUBE_API_KEY_2,
     process.env.YOUTUBE_API_KEY_3,
+    process.env.YOUTUBE_API_KEY_4,
+    process.env.YOUTUBE_API_KEY_5,
+    process.env.YOUTUBE_API_KEY_6,
+    process.env.YOUTUBE_API_KEY_7,
+    process.env.YOUTUBE_API_KEY_8,
   ].filter(Boolean);
   if (keys.length === 0) {
     console.error('Errore: nessuna YOUTUBE_API_KEY trovata nel file .env');
@@ -57,19 +141,71 @@ export function loadChannels() {
     if (err.code === 'ENOENT') throw new Error('File channels.txt non trovato');
     throw err;
   }
-  const handleRegex = /^@[\w.-]+$/;
-  const urlRegex = /^https?:\/\/(?:www\.)?youtube\.com\/@([\w.-]+)/;
+  const seen = new Set();
   return content.split('\n').map(l => l.trim()).filter(l => l.length > 0 && !l.startsWith('#'))
     .reduce((acc, line) => {
-      if (handleRegex.test(line)) acc.push(line);
-      else { const m = line.match(urlRegex); if (m) acc.push(`@${m[1]}`); }
+      const normalized = normalizeChannelEntry(line);
+      if (normalized && !seen.has(normalized)) {
+        seen.add(normalized);
+        acc.push(normalized);
+      }
       return acc;
     }, []);
+}
+
+function normalizeUnicodeValue(value) {
+  return String(value || '').trim().normalize('NFC');
+}
+
+function decodeUrlComponentSafe(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function normalizeYoutubePathSegment(segment) {
+  const decoded = decodeUrlComponentSafe(String(segment || ''));
+  return normalizeUnicodeValue(decoded).replace(/\/+$/, '');
+}
+
+function normalizeChannelEntry(entry) {
+  const value = normalizeUnicodeValue(entry);
+  if (!value) return null;
+  if (/^@.+$/.test(value)) return normalizeYoutubePathSegment(value);
+  if (/^UC[\w-]{20,}$/.test(value)) return value;
+  if (!/^https?:\/\//i.test(value)) return null;
+
+  try {
+    const url = new URL(value);
+    const host = url.hostname.replace(/^www\./i, '').toLowerCase();
+    if (host !== 'youtube.com' && host !== 'm.youtube.com') return null;
+
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (parts.length === 0) return null;
+
+    const firstPart = normalizeYoutubePathSegment(parts[0]);
+    const secondPart = normalizeYoutubePathSegment(parts[1] || '');
+
+    if (firstPart.startsWith('@')) return `@${firstPart.slice(1)}`;
+    if (firstPart === 'channel' && secondPart) return secondPart;
+    if ((firstPart === 'c' || firstPart === 'user') && secondPart) {
+      return `https://www.youtube.com/${firstPart}/${encodeURIComponent(secondPart)}`;
+    }
+    return `https://www.youtube.com/${encodeURIComponent(firstPart)}`;
+  } catch {
+    return null;
+  }
 }
 
 // ─── Channel ID cache ─────────────────────────────────────────────────────────
 
 const CACHE_FILE = join(__dirname, 'channel_ids.json');
+const SHORTS_CACHE_FILE = join(__dirname, 'shorts_cache.json');
+const FEED_CACHE_FILE = join(__dirname, 'feed_cache.json');
+const FEED_CACHE_TTL = 3600000; // 1 ora in ms
+
 function loadCache() {
   if (!existsSync(CACHE_FILE)) return {};
   try { return JSON.parse(readFileSync(CACHE_FILE, 'utf-8')); } catch { return {}; }
@@ -77,15 +213,179 @@ function loadCache() {
 function saveCache(cache) {
   try { writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2)); } catch (e) { console.error(e.message); }
 }
+function loadShortsCache() {
+  if (!existsSync(SHORTS_CACHE_FILE)) return { data: [], timestamp: 0 };
+  try { return JSON.parse(readFileSync(SHORTS_CACHE_FILE, 'utf-8')); } catch { return { data: [], timestamp: 0 }; }
+}
+function saveShortsCache(shorts) {
+  try { writeFileSync(SHORTS_CACHE_FILE, JSON.stringify({ data: shorts, timestamp: Date.now() }, null, 2)); } catch (e) { console.error(e.message); }
+}
+function loadFeedCache() {
+  if (!existsSync(FEED_CACHE_FILE)) return { data: [], timestamp: 0, coverageDays: DEFAULT_CACHE_COVERAGE_DAYS, summary: null };
+  try {
+    const cached = JSON.parse(readFileSync(FEED_CACHE_FILE, 'utf-8'));
+    return {
+      data: Array.isArray(cached.data) ? cached.data : [],
+      timestamp: cached.timestamp || 0,
+      coverageDays: Number.isInteger(cached.coverageDays) && cached.coverageDays > 0
+        ? cached.coverageDays
+        : DEFAULT_CACHE_COVERAGE_DAYS,
+      summary: cached.summary && typeof cached.summary === 'object' ? cached.summary : null,
+      channelSignature: typeof cached.channelSignature === 'string' ? cached.channelSignature : '',
+      channelCount: Number.isInteger(cached.channelCount) ? cached.channelCount : 0
+    };
+  } catch {
+    return { data: [], timestamp: 0, coverageDays: DEFAULT_CACHE_COVERAGE_DAYS, summary: null, channelSignature: '', channelCount: 0 };
+  }
+}
+function getChannelsSignature(channels) {
+  return [...channels].map(channel => String(channel || '').trim()).filter(Boolean).sort().join('\n');
+}
+
+function saveFeedCache(shorts, coverageDays, summary = null, channels = []) {
+  try {
+    writeFileSync(FEED_CACHE_FILE, JSON.stringify({
+      data: shorts,
+      timestamp: Date.now(),
+      coverageDays,
+      summary,
+      channelSignature: getChannelsSignature(channels),
+      channelCount: channels.length
+    }, null, 2));
+  } catch (e) { console.error(e.message); }
+}
+
+function normalizeHandleForComparison(value) {
+  return normalizeUnicodeValue(value)
+    .replace(/^@+/, '')
+    .toLowerCase();
+}
+
+async function resolveChannelIdBySearchQuery(query) {
+  const target = normalizeHandleForComparison(query);
+  if (!target) return null;
+
+  const searchData = await fetchWithKeyRotation(apiKey =>
+    `https://www.googleapis.com/youtube/v3/search?part=snippet&type=channel&q=${encodeURIComponent(query)}&maxResults=5&key=${apiKey}`
+  );
+
+  const candidateIds = [...new Set(
+    (searchData.items || [])
+      .map(item => item?.id?.channelId)
+      .filter(Boolean)
+  )];
+
+  if (candidateIds.length === 0) return null;
+  if (candidateIds.length === 1) return candidateIds[0];
+
+  const channelData = await fetchWithKeyRotation(apiKey =>
+    `https://www.googleapis.com/youtube/v3/channels?part=snippet&id=${encodeURIComponent(candidateIds.join(','))}&key=${apiKey}`
+  );
+
+  const matchesByCustomUrl = (channelData.items || []).filter(item =>
+    normalizeHandleForComparison(item?.snippet?.customUrl || '') === target
+  );
+  if (matchesByCustomUrl.length === 1) return matchesByCustomUrl[0].id;
+
+  const matchesByTitle = (channelData.items || []).filter(item =>
+    normalizeHandleForComparison(item?.snippet?.title || '') === target
+  );
+  if (matchesByTitle.length === 1) return matchesByTitle[0].id;
+
+  const includesMatches = (channelData.items || []).filter(item => {
+    const customUrl = normalizeHandleForComparison(item?.snippet?.customUrl || '');
+    const title = normalizeHandleForComparison(item?.snippet?.title || '');
+    return customUrl.includes(target) || title.includes(target);
+  });
+  if (includesMatches.length === 1) return includesMatches[0].id;
+
+  return null;
+}
+
 async function resolveChannelId(handle, cache) {
-  if (cache[handle]) return cache[handle];
-  const h = handle.startsWith('@') ? handle.slice(1) : handle;
-  const data = await fetchWithKeyRotation(key => `https://www.googleapis.com/youtube/v3/channels?part=id&forHandle=${encodeURIComponent(h)}&key=${key}`);
-  if (!data.items || data.items.length === 0) throw new Error(`Canale non trovato: ${handle}`);
-  cache[handle] = data.items[0].id;
-  saveCache(cache);
-  console.log(`✓ ${handle} → ${cache[handle]}`);
-  return cache[handle];
+  const key = normalizeUnicodeValue(handle);
+  if (cache[key]) return cache[key];
+  if (/^UC[\w-]{20,}$/.test(key)) {
+    cache[key] = key;
+    saveCache(cache);
+    return key;
+  }
+
+  if (/^https?:\/\//i.test(key)) {
+    const resolvedFromUrl = await resolveChannelIdFromUrl(key);
+    cache[key] = resolvedFromUrl;
+    saveCache(cache);
+    console.log(`✓ ${key} → ${cache[key]}`);
+    return cache[key];
+  }
+
+  const h = key.startsWith('@') ? key.slice(1) : key;
+
+  try {
+    const data = await fetchWithKeyRotation(apiKey => `https://www.googleapis.com/youtube/v3/channels?part=id&forHandle=${encodeURIComponent(h)}&key=${apiKey}`);
+    if (data.items && data.items.length > 0) {
+      cache[key] = data.items[0].id;
+      saveCache(cache);
+      console.log(`✓ ${key} → ${cache[key]}`);
+      return cache[key];
+    }
+  } catch (err) {
+    console.warn(`forHandle fallito per ${key}: ${err.message}`);
+  }
+
+  // Fallback robusto: per handle Unicode prova risoluzione dalla pagina canale.
+  if (key.startsWith('@')) {
+    const fallbackUrl = `https://www.youtube.com/@${encodeURIComponent(h)}`;
+    try {
+      const resolvedFromUrl = await resolveChannelIdFromUrl(fallbackUrl);
+      cache[key] = resolvedFromUrl;
+      saveCache(cache);
+      console.log(`✓ ${key} → ${cache[key]} (fallback URL)`);
+      return cache[key];
+    } catch (err) {
+      console.warn(`Fallback URL fallito per ${key}: ${err.message}`);
+    }
+
+    try {
+      const resolvedBySearch = await resolveChannelIdBySearchQuery(h);
+      if (resolvedBySearch) {
+        cache[key] = resolvedBySearch;
+        saveCache(cache);
+        console.log(`✓ ${key} → ${cache[key]} (fallback search)`);
+        return cache[key];
+      }
+    } catch (err) {
+      console.warn(`Fallback search fallito per ${key}: ${err.message}`);
+    }
+  }
+
+  throw new Error(`Canale non trovato: ${key}`);
+}
+
+async function resolveChannelIdFromUrl(channelUrl) {
+  const response = await fetch(channelUrl, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0',
+      'Accept-Language': 'en-US,en;q=0.9'
+    },
+    redirect: 'follow'
+  });
+
+  if (!response.ok) throw new Error(`Canale non trovato: ${channelUrl}`);
+  const html = await response.text();
+  const patterns = [
+    /https?:\/\/(?:www\.)?youtube\.com\/channel\/(UC[\w-]{20,})/i,
+    /"externalId":"(UC[\w-]{20,})"/i,
+    /"browseId":"(UC[\w-]{20,})"/i,
+    /channelId=\"(UC[\w-]{20,})\"/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match) return match[1];
+  }
+
+  throw new Error(`Canale non trovato: ${channelUrl}`);
 }
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
@@ -140,30 +440,106 @@ export function parseDuration(duration) {
 }
 export function validateMinViews(value) {
   const num = Number(value);
-  return (Number.isInteger(num) && num > 0) ? num : 1_000_000;
+  return (Number.isInteger(num) && num > 0) ? num : DEFAULT_MIN_VIEWS;
 }
 
-// ─── RSS ─────────────────────────────────────────────────────────────────────
-
-async function fetchRssFeed(channelId) {
-  const res = await fetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-  if (!res.ok) throw new Error(`RSS error ${res.status}`);
-  return res.text();
+export function validatePeriod(value) {
+  const num = Number(value);
+  return (Number.isInteger(num) && num > 0) ? num : DEFAULT_PERIOD_DAYS;
 }
-function parseRssEntries(xml) {
-  const entries = [];
-  const re = /<entry>([\s\S]*?)<\/entry>/g;
-  let m;
-  while ((m = re.exec(xml)) !== null) {
-    const b = m[1];
-    const videoId = (b.match(/<yt:videoId>(.*?)<\/yt:videoId>/) || [])[1];
-    const title = (b.match(/<title>(.*?)<\/title>/) || [])[1];
-    const published = (b.match(/<published>(.*?)<\/published>/) || [])[1];
-    const channelName = (b.match(/<name>(.*?)<\/name>/) || [])[1];
-    if (videoId && title && published)
-      entries.push({ videoId, title: title.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"'), published, channelName: channelName || '', thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` });
+
+function shouldIncludeShort(short, periodDays, minViews, now) {
+  const ageMs = now - new Date(short.publishedAt).getTime();
+  const ageDays = ageMs / (1000 * 60 * 60 * 24);
+  const ageHours = ageMs / (1000 * 60 * 60);
+
+  if (ageDays > periodDays) return false;
+  if (short.views >= minViews) return true;
+
+  return minViews <= DEFAULT_MIN_VIEWS
+    && short.views >= RECENT_EXCEPTION_MIN_VIEWS
+    && ageHours <= RECENT_EXCEPTION_MAX_HOURS;
+}
+
+function filterShorts(shorts, periodDays, minViews, now) {
+  return shorts.filter(short => shouldIncludeShort(short, periodDays, minViews, now));
+}
+
+// ─── Playlist uploads per canale (API v3) ───────────────────────────────────
+
+async function fetchChannelDetails(channelId) {
+  const data = await fetchWithKeyRotation(key =>
+    `https://www.googleapis.com/youtube/v3/channels?part=contentDetails,snippet&id=${encodeURIComponent(channelId)}&key=${key}`
+  );
+  const item = data.items?.[0];
+  if (!item) return null;
+  return {
+    uploadsPlaylistId: item.contentDetails?.relatedPlaylists?.uploads || null,
+    channelTitle: item.snippet?.title || '',
+    channelThumbnail: item.snippet?.thumbnails?.default?.url
+      || item.snippet?.thumbnails?.medium?.url
+      || item.snippet?.thumbnails?.high?.url
+      || ''
+  };
+}
+
+function getPlaylistPageLimit(periodDays) {
+  if (periodDays <= 7) return 2;
+  if (periodDays <= 30) return 4;
+  if (periodDays <= 90) return 8;
+  if (periodDays <= 365) return 16;
+  return 24;
+}
+
+async function fetchVideosForChannel(channelId, cutoffDate, periodDays) {
+  const channelDetails = await fetchChannelDetails(channelId);
+  const uploadsPlaylistId = channelDetails?.uploadsPlaylistId;
+  if (!uploadsPlaylistId) {
+    return { entries: [], channelDetails };
   }
-  return entries;
+
+  const entries = [];
+  const maxPages = getPlaylistPageLimit(periodDays);
+  let pageToken = '';
+  let pageCount = 0;
+  let reachedCutoff = false;
+
+  while (pageCount < maxPages && !reachedCutoff) {
+    const data = await fetchWithKeyRotation(key =>
+      `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId=${encodeURIComponent(uploadsPlaylistId)}&maxResults=50${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}&key=${key}`
+    );
+
+    const items = data.items || [];
+    if (items.length === 0) break;
+
+    for (const item of items) {
+      const snippet = item.snippet;
+      const videoId = snippet?.resourceId?.videoId;
+      const published = snippet?.publishedAt;
+
+      if (!snippet || !videoId || !published) continue;
+      if (cutoffDate && new Date(published) < cutoffDate) {
+        reachedCutoff = true;
+        break;
+      }
+
+      entries.push({
+        videoId,
+        title: snippet.title,
+        published,
+        channelName: snippet.channelTitle || channelDetails?.channelTitle || '',
+        channelId,
+        channelThumbnail: channelDetails?.channelThumbnail || '',
+        thumbnail: snippet.thumbnails?.high?.url || snippet.thumbnails?.default?.url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`
+      });
+    }
+
+    pageToken = data.nextPageToken || '';
+    pageCount += 1;
+    if (!pageToken) break;
+  }
+
+  return { entries, channelDetails };
 }
 
 // ─── Stats API ───────────────────────────────────────────────────────────────
@@ -190,9 +566,17 @@ async function fetchVideoStats(videoIds) {
 async function fetchShortsForChannel(handle, cutoffDate, cache) {
   try {
     const channelId = await resolveChannelId(handle, cache);
-    const xml = await fetchRssFeed(channelId);
-    const entries = parseRssEntries(xml).filter(e => new Date(e.published) >= cutoffDate);
-    if (entries.length === 0) return { shorts: [], error: null };
+    const periodDays = cutoffDate ? Math.max(1, Math.ceil((Date.now() - cutoffDate.getTime()) / (1000 * 60 * 60 * 24))) : DEFAULT_PERIOD_DAYS;
+    const { entries, channelDetails } = await fetchVideosForChannel(channelId, cutoffDate, periodDays);
+    if (entries.length === 0) {
+      return {
+        handle,
+        channelId,
+        channelTitle: channelDetails?.channelTitle || handle,
+        shorts: [],
+        error: null
+      };
+    }
     const statsMap = await fetchVideoStats(entries.map(e => e.videoId));
     const shorts = [];
     
@@ -214,6 +598,9 @@ async function fetchShortsForChannel(handle, cutoffDate, cache) {
         id: e.videoId,
         title: e.title,
         channelName: e.channelName,
+        channelId: e.channelId,
+        channelHandle: handle,
+        channelThumbnail: e.channelThumbnail,
         thumbnail: e.thumbnail,
         views: stats.views,
         likes: stats.likes,
@@ -241,10 +628,16 @@ async function fetchShortsForChannel(handle, cutoffDate, cache) {
     for (const short of allShorts) {
       shorts.push(short);
     }
-    return { shorts, error: null };
+    return {
+      handle,
+      channelId,
+      channelTitle: channelDetails?.channelTitle || shorts[0]?.channelName || handle,
+      shorts,
+      error: null
+    };
   } catch (err) {
     console.error(`Errore per il canale ${handle}:`, err.message);
-    return { shorts: [], error: { channel: handle, message: err.message } };
+    return { handle, channelId: null, channelTitle: handle, shorts: [], error: { channel: handle, message: err.message } };
   }
 }
 
@@ -257,6 +650,36 @@ function loadSaved() {
 }
 function saveSaved(data) {
   try { writeFileSync(SAVED_FILE, JSON.stringify(data, null, 2)); } catch (e) { console.error(e.message); }
+}
+
+async function refreshSavedVideoStats(saved) {
+  const ids = Object.keys(saved || {});
+  if (ids.length === 0) return { total: 0, updated: 0, missing: 0 };
+
+  loadConfig();
+  const statsMap = await fetchVideoStats(ids);
+  let updated = 0;
+  let missing = 0;
+  const refreshedAt = new Date().toISOString();
+
+  for (const id of ids) {
+    const stats = statsMap[id];
+    if (!stats) {
+      missing += 1;
+      continue;
+    }
+
+    const item = saved[id];
+    if (!item) continue;
+
+    item.views = stats.views;
+    item.likes = stats.likes;
+    item.comments = stats.comments;
+    item.lastStatsRefreshAt = refreshedAt;
+    updated += 1;
+  }
+
+  return { total: ids.length, updated, missing, refreshedAt };
 }
 
 async function handleSavedApi(req, res) {
@@ -301,20 +724,40 @@ async function handleSavedApi(req, res) {
   }
   if (req.method === 'DELETE') {
     const id = url.searchParams.get('id');
+    const ids = url.searchParams.get('ids');
     const saved = loadSaved();
-    if (saved[id]) { delete saved[id]; saveSaved(saved); }
+    if (id && saved[id]) { delete saved[id]; saveSaved(saved); }
+    if (ids) { 
+      const idArray = ids.split(',');
+      idArray.forEach(id => { if (saved[id]) delete saved[id]; });
+      saveSaved(saved);
+    }
     res.writeHead(200); res.end(JSON.stringify({ ok: true })); return;
   }
   if (req.method === 'PATCH') {
     let body = '';
     req.on('data', c => body += c);
-    req.on('end', () => {
+    req.on('end', async () => {
       try {
-        const { id, copied } = JSON.parse(body);
+        const payload = JSON.parse(body || '{}');
+
+        if (payload.action === 'refreshAll') {
+          const saved = loadSaved();
+          const result = await refreshSavedVideoStats(saved);
+          saveSaved(saved);
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true, ...result }));
+          return;
+        }
+
+        const { id, copied } = payload;
         const saved = loadSaved();
         if (saved[id]) { saved[id].copied = copied; saveSaved(saved); }
         res.writeHead(200); res.end(JSON.stringify({ ok: true }));
-      } catch { res.writeHead(400); res.end('{}'); }
+      } catch (err) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: err.message || 'Bad Request' }));
+      }
     }); return;
   }
   res.writeHead(405); res.end('Method Not Allowed');
@@ -626,11 +1069,53 @@ async function recognizeAudioPipeline(audioUrl, videoTitle = '') {
   return { success: false, results: [], message: 'Audio non riconosciuto' };
 }
 
+function shouldVerifyAudDWithPython(result, videoTitle = '') {
+  if (!result?.success || result?.source !== 'audd' || !Array.isArray(result.results) || result.results.length === 0) {
+    return false;
+  }
+
+  const firstTrack = result.results[0];
+  const recognizedText = `${firstTrack?.title || ''} ${firstTrack?.artist || ''}`.toLowerCase();
+  const titleText = String(videoTitle || '').toLowerCase();
+
+  // Heuristic mirata: riduce falsi positivi vocali su shorts Minecraft/C418.
+  const minecraftContext = /(minecraft|c418|マイクラ|마크|майнкрафт)/i.test(titleText);
+  const suspiciousWords = /\bnegro\b/i.test(recognizedText);
+
+  return minecraftContext && suspiciousWords;
+}
+
+async function runPythonAudioRecognition(audioUrl, videoTitle = '') {
+  const { execFile } = await import('child_process');
+  const { promisify } = await import('util');
+  const execFileAsync = promisify(execFile);
+
+  const { stdout } = await execFileAsync(PYTHON, [
+    join(__dirname, 'shazam_recognition_new.py'),
+    audioUrl,
+    videoTitle
+  ], { timeout: 60000, maxBuffer: 20 * 1024 * 1024 });
+
+  return JSON.parse(stdout);
+}
+
 async function shazamRecognize(audioUrl, videoTitle = '') {
   // Try new pipeline first (AudD + Title-based)
   try {
     const result = await recognizeAudioPipeline(audioUrl, videoTitle);
     if (result.success) {
+      if (shouldVerifyAudDWithPython(result, videoTitle)) {
+        console.warn('⚠ Match AudD sospetto in contesto Minecraft: verifica con Python+Demucs...');
+        try {
+          const verified = await runPythonAudioRecognition(audioUrl, videoTitle);
+          if (verified?.success && Array.isArray(verified.results) && verified.results.length > 0) {
+            return verified;
+          }
+        } catch (verifyErr) {
+          console.warn('Verifica Python fallita, uso comunque AudD:', verifyErr.message);
+        }
+      }
+
       return {
         success: true,
         results: result.results,
@@ -642,20 +1127,10 @@ async function shazamRecognize(audioUrl, videoTitle = '') {
   }
   
   // Fallback: Python script (for backward compatibility)
-  const { execFile } = await import('child_process');
-  const { promisify } = await import('util');
-  const execFileAsync = promisify(execFile);
-
   try {
     console.log(`⚡ Fallback: Python script...`);
-    const { stdout } = await execFileAsync(PYTHON, [
-      join(__dirname, 'shazam_recognition_new.py'),
-      audioUrl,
-      videoTitle
-    ], { timeout: 60000, maxBuffer: 20 * 1024 * 1024 });
-
+    const parsed = await runPythonAudioRecognition(audioUrl, videoTitle);
     try {
-      const parsed = JSON.parse(stdout);
       return parsed;
     } catch (parseErr) {
       console.warn('Python script JSON parse error:', parseErr.message);
@@ -803,35 +1278,122 @@ async function handleLookupApi(req, res) {
   }
 }
 
+async function handleStatsApi(req, res) {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const saved = loadSaved();
+    const totalSaved = Object.keys(saved).length;
+    const copiedCount = Object.values(saved).filter(item => item.copied === true).length;
+    res.writeHead(200);
+    res.end(JSON.stringify({ totalSaved, copied: copiedCount }));
+  } catch (err) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: err.message }));
+  }
+}
+
 export async function handleApiShorts(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const periodParam = parseInt(url.searchParams.get('period') ?? '7', 10);
-  const period = [1, 2, 7].includes(periodParam) ? periodParam : 7;
-  const minViews = validateMinViews(url.searchParams.get('minViews') ?? '1000000');
-  const cutoffDate = new Date(Date.now() - period * 24 * 60 * 60 * 1000);
+  const period = validatePeriod(url.searchParams.get('period') ?? String(DEFAULT_PERIOD_DAYS));
+  const minViews = validateMinViews(url.searchParams.get('minViews') ?? String(DEFAULT_MIN_VIEWS));
+  const forceRefresh = ['1', 'true', 'yes'].includes((url.searchParams.get('forceRefresh') || '').toLowerCase());
+  
   res.setHeader('Content-Type', 'application/json');
+
   let channels;
   try { channels = loadChannels(); }
   catch (err) { res.writeHead(500); res.end(JSON.stringify({ error: err.message })); return; }
+  const totalChannels = channels.length;
+  const currentChannelSignature = getChannelsSignature(channels);
+  
+  // Controlla il cache del feed - se è fresco (< 1 ora), usalo senza fare nuove richieste
+  const cachedFeed = loadFeedCache();
+  const now = Date.now();
+  const cacheAge = now - (cachedFeed.timestamp || 0);
+  const cacheCoverageDays = validatePeriod(cachedFeed.coverageDays || DEFAULT_CACHE_COVERAGE_DAYS);
+  const cacheHasChannelMetadata = Array.isArray(cachedFeed.data)
+    && cachedFeed.data.every(short => typeof short.channelId === 'string' && short.channelId.length > 0 && typeof short.channelThumbnail === 'string');
+  const cacheMatchesTrackedChannels = cachedFeed.channelSignature === currentChannelSignature && cachedFeed.channelCount === totalChannels;
+
+  if (!forceRefresh && cacheAge < FEED_CACHE_TTL && cachedFeed.data && cachedFeed.data.length > 0 && cacheCoverageDays >= period && cacheHasChannelMetadata && cacheMatchesTrackedChannels) {
+    console.log(`✅ Cache feed valido (${Math.floor(cacheAge / 60000)}m fa) - 0 crediti consumati`);
+    const filteredCache = filterShorts(cachedFeed.data, period, minViews, now);
+    const uniqueChannels = new Set(filteredCache.map(s => s.channelName)).size;
+    const cachedSummary = cachedFeed.summary || {};
+    const successfulChannels = Number.isInteger(cachedSummary.successfulChannels) ? cachedSummary.successfulChannels : totalChannels;
+    const failedChannels = Array.isArray(cachedSummary.failedChannels) ? cachedSummary.failedChannels : [];
+    res.writeHead(200);
+    res.end(JSON.stringify({ 
+      shorts: filteredCache, 
+      fromCache: true, 
+      cacheAgeMinutes: Math.floor(cacheAge / 60000),
+      errors: Array.isArray(cachedSummary.errors) ? cachedSummary.errors : [],
+      channelCount: uniqueChannels,
+      channelsMatchingFilter: uniqueChannels,
+      successfulChannels,
+      failedChannels,
+      channelsWithoutMatches: Math.max(0, successfulChannels - uniqueChannels),
+      totalChannels: totalChannels
+    }));
+    return;
+  }
+
+  if (forceRefresh) {
+    console.log('🔄 Refresh manuale richiesto: cache bypassata');
+  }
+  
+  const cutoffDate = new Date(now - period * 24 * 60 * 60 * 1000);
   loadConfig();
   const cache = loadCache();
+  
+  console.log(`🔍 Ricerca completa: ultimi ${period} giorni su ${channels.length} canali`);
+  
   const results = await Promise.all(channels.map(ch => fetchShortsForChannel(ch, cutoffDate, cache)));
-  const allShorts = [], allErrors = [];
+  const allShorts = [];
+  const allErrors = [];
   for (const { shorts, error } of results) { allShorts.push(...shorts); if (error) allErrors.push(error); }
-  const now = Date.now();
-  const filtered = allShorts.filter(s => {
-    const ageMs = now - new Date(s.publishedAt).getTime();
-    const ageDays = ageMs / (1000 * 60 * 60 * 24);
-    // Mostra se ≥1M, oppure se ha meno di 2 giorni e ≥800k
-    return s.views >= minViews || (ageDays <= 2 && s.views >= 800_000);
-  }).sort((a, b) => b.views - a.views);
+  const successfulChannels = results.filter(result => !result.error).length;
+  
+  const allForCache = allShorts
+    .sort((a, b) => b.views - a.views);
+  const filtered = filterShorts(allForCache, period, minViews, now);
+  const uniqueChannels = new Set(filtered.map(s => s.channelName)).size;
+  const summary = {
+    successfulChannels,
+    failedChannels: allErrors.map(error => error.channel),
+    errors: allErrors
+  };
+  
+  if (allForCache.length > 0) {
+    saveFeedCache(allForCache, period, summary, channels);
+    console.log(`💾 Feed cache aggiornato (${allForCache.length} video totali, copertura ${period} giorni)`);
+  }
+  
   res.writeHead(200);
-  res.end(JSON.stringify({ shorts: filtered, errors: allErrors, channelCount: channels.length }));
+  res.end(JSON.stringify({ 
+    shorts: filtered, 
+    fromCache: false, 
+    errors: allErrors, 
+    channelCount: uniqueChannels,
+    channelsMatchingFilter: uniqueChannels,
+    successfulChannels,
+    failedChannels: allErrors.map(error => error.channel),
+    channelsWithoutMatches: Math.max(0, successfulChannels - uniqueChannels),
+    totalChannels: totalChannels,
+    creditsApprox: estimateCreditsForFetch(channels.length, 50, period).total
+  }));
 }
 
 // ─── HTML ─────────────────────────────────────────────────────────────────────
 
 export function getHtml() {
+  const trackedChannels = (() => {
+    try {
+      return loadChannels();
+    } catch {
+      return [];
+    }
+  })();
   return `<!DOCTYPE html>
 <html lang="it">
 <head>
@@ -844,23 +1406,37 @@ export function getHtml() {
     header{background:#1a1a1a;border-bottom:2px solid #ff0000;padding:14px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
     header h1{font-size:1.3rem;font-weight:700;color:#fff}
     header h1 span{color:#ff0000}
-    .tab-btns{display:flex;gap:8px}
-    .tab-btn{background:#2a2a2a;color:#ccc;border:1px solid #3a3a3a;border-radius:6px;padding:6px 16px;cursor:pointer;font-size:0.9rem;transition:background .15s}
+    .tab-btns{display:flex;gap:8px;flex-wrap:wrap}
+    .tab-btn{background:#2a2a2a;color:#ccc;border:1px solid #3a3a3a;border-radius:6px;padding:6px 16px;cursor:pointer;font-size:0.9rem;transition:background .15s;position:relative}
     .tab-btn.active{background:#ff0000;color:#fff;border-color:#ff0000}
+    .tab-counter{display:inline-block;background:rgba(0,0,0,.4);padding:2px 8px;border-radius:12px;font-size:.75rem;margin-left:6px;font-weight:600;color:#ccc}
+    .tab-btn.active .tab-counter{background:rgba(0,0,0,.6);color:#fff}
     .controls{background:#1a1a1a;padding:12px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;border-bottom:1px solid #2a2a2a}
-    .period-group{display:flex;gap:8px;align-items:center}
+    .period-group{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     .period-group label{font-size:.85rem;color:#aaa}
     .btn-period{background:#2a2a2a;color:#ccc;border:1px solid #3a3a3a;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:.9rem;transition:background .15s}
     .btn-period:hover{background:#333;color:#fff}
     .btn-period.active{background:#ff0000;color:#fff;border-color:#ff0000}
+    .period-group input{background:#2a2a2a;color:#e0e0e0;border:1px solid #3a3a3a;border-radius:6px;padding:6px 10px;font-size:.9rem;width:96px;outline:none}
+    .period-group input:focus{border-color:#ff0000}
     .views-group{display:flex;align-items:center;gap:8px}
     .views-group label{font-size:.85rem;color:#aaa}
     .views-group input{background:#2a2a2a;color:#e0e0e0;border:1px solid #3a3a3a;border-radius:6px;padding:6px 10px;font-size:.9rem;width:130px;outline:none}
     .views-group input:focus{border-color:#ff0000}
     .views-search-btn{background:#ff0000;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:1rem;transition:background .15s}
     .views-search-btn:hover{background:#cc0000}
+    .manual-refresh-btn{background:#2a7d2e;color:#fff;border:1px solid #37a13d;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:.86rem;font-weight:700;transition:background .15s,border-color .15s}
+    .manual-refresh-btn:hover{background:#218a2b;border-color:#45b34d}
+    .manual-refresh-btn:disabled{opacity:.65;cursor:wait}
     .refresh-info{margin-left:auto;font-size:.8rem;color:#888;text-align:right;line-height:1.6}
     .refresh-info .countdown{color:#ff0000;font-weight:600}
+    #creditsStatus{background:#1a1a1a;border:2px solid #2a2a2a;border-radius:8px;padding:10px 16px;margin-left:auto;transition:border-color .3s,background .3s}
+    #channelsTracked{font-size:.9rem;color:#e0e0e0;margin-left:16px;padding:8px 12px;background:#1a1a1a;border-radius:6px;border:1px solid #2a2a2a}
+    #creditsStatus.low-credits{border-color:#ffa94d;background:rgba(255,169,77,.08)}
+    #creditsStatus.critical-credits{border-color:#ff6b6b;background:rgba(255,107,107,.12);animation:pulse-red .8s ease-in-out infinite}
+    @keyframes pulse-red{0%,100%{background:rgba(255,107,107,.12)}50%{background:rgba(255,107,107,.18)}}
+    #creditsInfo{font-size:1rem;font-weight:600;color:#ccc;display:flex;align-items:center;gap:6px}
+    #creditsResetDate{font-size:.75rem;color:#666;margin-top:4px}
     #statsInfo{color:#ccc;font-size:.85rem;display:block;margin-bottom:2px}
     main{padding:24px}
     .spinner{display:none;justify-content:center;align-items:center;padding:60px 0}
@@ -932,6 +1508,22 @@ export function getHtml() {
     .btn-holly:hover{background:#4a1a3a}
     .btn-cancel{background:#2a2a2a;color:#aaa;border:1px solid #3a3a3a;border-radius:8px;padding:10px 22px;cursor:pointer;font-size:.95rem;transition:background .15s}
     .btn-cancel:hover{background:#333}
+    .channel-toolbar{display:none;align-items:center;gap:12px;margin-bottom:18px;flex-wrap:wrap}
+    .channel-toolbar.visible{display:flex}
+    .channel-back-btn{background:#2a2a2a;color:#eee;border:1px solid #3a3a3a;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:.9rem}
+    .channel-back-btn:hover{background:#333}
+    .channel-toolbar-title{font-size:1rem;font-weight:700;color:#fff}
+    .saved-refresh-btn{margin-left:auto;background:#2a7d2e;color:#fff;border:1px solid #37a13d;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:.85rem;font-weight:700;transition:background .15s,border-color .15s}
+    .saved-refresh-btn:hover{background:#218a2b;border-color:#45b34d}
+    .saved-refresh-btn:disabled{opacity:.65;cursor:wait}
+    .channel-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:16px}
+    .channel-card{background:#1a1a1a;border:1px solid #2f2f2f;border-radius:16px;padding:18px 14px;cursor:pointer;transition:transform .15s,border-color .15s,background .15s;text-align:center}
+    .channel-card:hover{transform:translateY(-3px);border-color:#ff0000;background:#202020}
+    .channel-card-error{border-color:#7a2e2e;background:#231616}
+    .channel-card-error:hover{border-color:#d65b5b;background:#2b1a1a}
+    .channel-avatar{width:72px;height:72px;border-radius:50%;object-fit:cover;display:block;margin:0 auto 10px;background:#2a2a2a;border:2px solid #343434}
+    .channel-name{font-size:.88rem;font-weight:600;color:#fff;line-height:1.35;word-break:break-word}
+    .channel-short-count{margin-top:8px;font-size:.76rem;color:#aaa}
 
     /* ── Mobile responsive ─────────────────── */
     @media(max-width:768px){
@@ -942,6 +1534,7 @@ export function getHtml() {
       .period-group{flex-wrap:wrap;gap:6px}
       .btn-period{padding:5px 10px;font-size:.82rem}
       .views-group{width:100%}
+      .manual-refresh-btn{width:100%}
       .views-group input{flex:1;width:auto}
       .refresh-info{margin-left:0;text-align:center;font-size:.75rem}
       .search-bar{flex-direction:column}
@@ -962,6 +1555,10 @@ export function getHtml() {
       .popup h3{font-size:.95rem}
       .btn-arkadia,.btn-holly,.btn-cancel{padding:8px 16px;font-size:.85rem}
       #audioResult{font-size:.82rem}
+      .channel-grid{grid-template-columns:repeat(2,1fr);gap:10px}
+      .channel-card{padding:14px 10px}
+      .channel-avatar{width:60px;height:60px}
+      .saved-refresh-btn{margin-left:0;width:100%}
     }
     @media(max-width:420px){
       .grid{grid-template-columns:1fr}
@@ -975,22 +1572,31 @@ export function getHtml() {
   <header>
     <h1><span>YouTube</span> Shorts Viewer</h1>
     <div class="tab-btns">
-      <button class="tab-btn active" id="tabFeed">Feed</button>
-      <button class="tab-btn" id="tabSaved">⭐ Salvati</button>
+      <button class="tab-btn active" id="tabFeed">Feed <span class="tab-counter" id="feedCounter"></span></button>
+      <button class="tab-btn" id="tabChannels">📺 Canali <span class="tab-counter" id="channelsCounter"></span></button>
+      <button class="tab-btn" id="tabCopied">✅ Copiati <span class="tab-counter" id="copiedCounter"></span></button>
+      <button class="tab-btn" id="tabSaved">⭐ Salvati <span class="tab-counter" id="savedCounter"></span></button>
+    </div>
+    <div id="channelsTracked">📺 Canali tracciati: <strong id="totalChannelsDisplay">66</strong></div>
+    <div id="creditsStatus">
+      <div id="creditsInfo">🔑 Crediti: ...</div>
+      <div id="creditsResetDate">Reset: ...</div>
     </div>
   </header>
   <div class="controls" id="controls">
     <div class="period-group">
-      <label>Periodo:</label>
+      <label for="periodDays">Periodo:</label>
       <button class="btn-period" data-period="1">1g</button>
       <button class="btn-period" data-period="2">2g</button>
       <button class="btn-period active" data-period="7">7g</button>
+      <input type="number" id="periodDays" value="7" min="1" step="1" title="Giorni da cercare"/>
     </div>
     <div class="views-group">
       <label for="minViews">Min. views:</label>
       <input type="number" id="minViews" value="1000000" min="1" step="1"/>
       <button class="views-search-btn" id="searchBtn" title="Cerca">🔍</button>
     </div>
+    <button class="manual-refresh-btn" id="manualRefreshBtn" title="Aggiorna subito le views">🔄 Aggiorna views ora</button>
     <div class="refresh-info">
       <span id="statsInfo"></span>
       Auto-refresh ogni 5 min &nbsp;|&nbsp; Prossimo: <span class="countdown" id="countdown">5:00</span>
@@ -1001,6 +1607,10 @@ export function getHtml() {
     </div>
   </div>
   <main>
+    <div class="channel-toolbar" id="channelBrowserToolbar">
+      <button class="channel-back-btn" id="channelBackBtn">← Tutti i canali</button>
+      <div class="channel-toolbar-title" id="channelToolbarTitle">Canali</div>
+    </div>
     <div class="spinner" id="spinner"><div class="spinner-ring"></div></div>
     <div class="empty-msg" id="emptyMsg">Nessuno Short trovato con i filtri selezionati</div>
     <div class="grid" id="grid"></div>
@@ -1026,191 +1636,12 @@ export function getHtml() {
       </div>
     </div>
   </div>
+  <script>
+    globalThis.trackedChannels = ${JSON.stringify(trackedChannels)};
+  </script>
   <script src="/client.js?v=${Date.now()}"></script>
 </body>
 </html>`;
-    let currentTab='feed',savedData={},pendingSave=null;
-    const videoMap={};
-
-    function fmt(n){if(n>=1000000)return(n/1000000).toFixed(1)+'M';if(n>=1000)return(n/1000).toFixed(1)+'K';return String(n)}
-    function fmtDate(iso){const d=new Date(iso);return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear()}
-
-    function startCountdown(){
-      clearInterval(countdownTimer);countdownSeconds=300;
-      countdownTimer=setInterval(()=>{
-        if(--countdownSeconds<0)countdownSeconds=0;
-        const m=Math.floor(countdownSeconds/60),s=countdownSeconds%60;
-        document.getElementById('countdown').textContent=m+':'+String(s).padStart(2,'0');
-      },1000);
-    }
-
-    async function loadSaved(){const r=await fetch('/api/saved');savedData=await r.json()}
-
-    function getBadges(id){
-      const e=savedData[id];if(!e||!e.users||!e.users.length)return '';
-      return e.users.map(u=>u==='Arkadia'?'<span class="badge badge-arkadia">Arkadia</span>':'<span class="badge badge-holly">Holly</span>').join(' ');
-    }
-
-    function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
-
-    function buildCard(s,forSaved){
-      const url='https://www.youtube.com/shorts/'+s.id;
-      videoMap[s.id]=s;
-      const saved=!!savedData[s.id];
-      const copied=savedData[s.id]?.copied===true;
-      const badges=getBadges(s.id);
-      const rankClass='card-rank-'+(s.rank||'gray');
-      const rankEmoji=s.rank==='diamond'?'💎':s.rank==='gold'?'🥇':s.rank==='silver'?'🥈':s.rank==='bronze'?'🥉':'⚫';
-      const fireIcon=s.viewsPerHour>100000?'🔥':'';
-      return '<div class="card '+rankClass+(copied?' copied':'')+'" data-id="'+s.id+'">'+'<div class="rank-badge">'+rankEmoji+'</div>'
-        +'<a class="card-thumb" href="'+url+'" target="_blank" rel="noopener noreferrer"><img src="'+esc(s.thumbnail)+'" alt="" loading="lazy"/></a>'
-        +'<div class="card-body">'
-        +'<a class="card-title" href="'+url+'" target="_blank" rel="noopener noreferrer">'+esc(s.title)+'</a>'
-        +'<div class="card-channel">'+esc(s.channelName)+'</div>'
-        +'<div class="card-stats"><span>👁 '+fmt(s.views)+'</span><span>👍 '+fmt(s.likes)+'</span></div>'
-        +'<div class="card-velocity"><span>⚡ '+fmt(s.viewsPerHour||0)+'/h'+fireIcon+'</span><span>📊 '+((s.engagementRatio||0).toFixed(2))+'% eng.</span></div>'
-        +'<div class="card-date">'+fmtDate(s.publishedAt)+'</div>'
-        +'<div class="card-actions">'
-        +'<button class="btn-save'+(saved?' saved':'')+'" data-id="'+s.id+'">'+(saved?'✓ Salvato':'+ Salva')+'</button>'
-        +(saved?'<button class="btn-copied'+(copied?' done':'')+'" data-id="'+s.id+'">'+(copied?'✅ Copiato':'📋 Segna copiato')+'</button>':'')
-        +(badges?'<span>'+badges+'</span>':'')
-        +(forSaved?'<button class="btn-remove" data-id="'+s.id+'">🗑</button>':'')
-        +'<button class="btn-audio" data-id="'+s.id+'">🎵 Audio</button>'
-        +'</div></div></div>';
-    }
-
-    function attachEvents(){
-      document.querySelectorAll('.btn-save').forEach(btn=>{
-        if(btn.classList.contains('saved'))return;
-        btn.addEventListener('click',()=>{
-          const id=btn.dataset.id;
-          const s=videoMap[id];
-          if(!s)return;
-          pendingSave={id:s.id,title:s.title,thumbnail:s.thumbnail,channelName:s.channelName,views:s.views,likes:s.likes,publishedAt:s.publishedAt,videoUrl:'https://www.youtube.com/shorts/'+s.id};
-          document.getElementById('popupOverlay').classList.add('visible');
-        });
-      });
-      document.querySelectorAll('.btn-copied').forEach(btn=>{
-        btn.addEventListener('click',async()=>{
-          const id=btn.dataset.id,newVal=!(savedData[id]?.copied===true);
-          await fetch('/api/saved',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,copied:newVal})});
-          await loadSaved();
-          currentTab==='saved'?renderSaved():fetchShorts();
-        });
-      });
-      document.querySelectorAll('.btn-remove').forEach(btn=>{
-        btn.addEventListener('click',async()=>{
-          await fetch('/api/saved?id='+btn.dataset.id,{method:'DELETE'});
-          await loadSaved();renderSaved();
-        });
-      });
-      document.querySelectorAll('.btn-audio').forEach(btn=>{
-        btn.addEventListener('click',async()=>{
-          const id=btn.dataset.id;
-          btn.textContent='⏳ Analisi...';btn.classList.add('loading');btn.disabled=true;
-          try{
-            const r=await fetch('/api/audio?id='+id);
-            const data=await r.json();
-            const res=document.getElementById('audioResult');
-            if(data.error){res.innerHTML='<span style="color:#f44336">Errore: '+data.error+'</span>';}
-            else{
-              const a=data.audd?.result;
-              let html='';
-              if(a&&a.title){
-                html+='<b>🎵 Canzone:</b> '+a.title+'<br>';
-                html+='<b>🎤 Artista:</b> '+a.artist+'<br>';
-                if(a.album)html+='<b>💿 Album:</b> '+a.album+'<br>';
-                if(a.release_date)html+='<b>📅 Data:</b> '+a.release_date+'<br>';
-                if(a.spotify?.external_urls?.spotify)html+='<br><a href="'+a.spotify.external_urls.spotify+'" target="_blank" style="color:#1db954">▶ Apri su Spotify</a><br>';
-                if(a.apple_music?.url)html+='<a href="'+a.apple_music.url+'" target="_blank" style="color:#fc3c44">🍎 Apri su Apple Music</a><br>';
-              }else{
-                html='<span style="color:#aaa">Canzone non riconosciuta.</span><br>';
-              }
-              html+='<br><a href="'+data.audioUrl+'" target="_blank" style="color:#64b5f6;font-size:.8rem">🔗 URL audio diretto</a>';
-              res.innerHTML=html;
-            }
-            document.getElementById('audioOverlay').classList.add('visible');
-          }catch(e){
-            alert('Errore durante l\'analisi audio.');
-          }finally{
-            btn.textContent='🎵 Audio';btn.classList.remove('loading');btn.disabled=false;
-          }
-        });
-      });
-    }
-
-    async function fetchShorts(){
-      if(currentTab!=='feed')return;
-      const spinner=document.getElementById('spinner'),grid=document.getElementById('grid'),emptyMsg=document.getElementById('emptyMsg'),statsInfo=document.getElementById('statsInfo');
-      spinner.classList.add('visible');grid.innerHTML='';emptyMsg.classList.remove('visible');
-      try{
-        await loadSaved();
-        const res=await fetch('/api/shorts?period='+currentPeriod+'&minViews='+currentMinViews);
-        const data=await res.json();const shorts=data.shorts||[];
-        if(!shorts.length){emptyMsg.classList.add('visible');statsInfo.textContent='';}
-        else{
-          statsInfo.textContent='📺 '+(data.channelCount||0)+' canali  •  🎬 '+shorts.length+' video';
-          grid.innerHTML=shorts.map(s=>buildCard(s,false)).join('');
-          attachEvents();
-        }
-      }catch(e){emptyMsg.textContent='Errore nel caricamento.';emptyMsg.classList.add('visible');}
-      finally{spinner.classList.remove('visible');startCountdown();}
-    }
-
-    async function renderSaved(){
-      await loadSaved();
-      const grid=document.getElementById('grid'),emptyMsg=document.getElementById('emptyMsg'),statsInfo=document.getElementById('statsInfo');
-      emptyMsg.classList.remove('visible');
-      const entries=Object.values(savedData);
-      if(!entries.length){grid.innerHTML='';emptyMsg.textContent='Nessun video salvato.';emptyMsg.classList.add('visible');statsInfo.textContent='';}
-      else{
-        statsInfo.textContent='⭐ '+entries.length+' video salvati';
-        grid.innerHTML=entries.map(s=>buildCard(s,true)).join('');
-        attachEvents();
-      }
-    }
-
-    async function saveForUser(user){
-      if(!pendingSave)return;
-      await fetch('/api/saved',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...pendingSave,user})});
-      document.getElementById('popupOverlay').classList.remove('visible');
-      pendingSave=null;await loadSaved();
-      currentTab==='saved'?renderSaved():fetchShorts();
-    }
-
-    document.getElementById('popupArkadia').addEventListener('click',()=>saveForUser('Arkadia'));
-    document.getElementById('popupHolly').addEventListener('click',()=>saveForUser('Holly'));
-    document.getElementById('popupCancel').addEventListener('click',()=>{document.getElementById('popupOverlay').classList.remove('visible');pendingSave=null;});
-    document.getElementById('audioClose').addEventListener('click',()=>document.getElementById('audioOverlay').classList.remove('visible'));
-
-    document.getElementById('tabFeed').addEventListener('click',()=>{
-      currentTab='feed';
-      document.getElementById('tabFeed').classList.add('active');document.getElementById('tabSaved').classList.remove('active');
-      document.getElementById('controls').style.display='';
-      document.getElementById('emptyMsg').textContent='Nessuno Short trovato con i filtri selezionati';
-      fetchShorts();
-    });
-    document.getElementById('tabSaved').addEventListener('click',()=>{
-      currentTab='saved';
-      document.getElementById('tabSaved').classList.add('active');document.getElementById('tabFeed').classList.remove('active');
-      document.getElementById('controls').style.display='none';
-      renderSaved();
-    });
-
-    document.querySelectorAll('.btn-period').forEach(btn=>{
-      btn.addEventListener('click',()=>{
-        document.querySelectorAll('.btn-period').forEach(b=>b.classList.remove('active'));
-        btn.classList.add('active');currentPeriod=parseInt(btn.dataset.period,10);fetchShorts();
-      });
-    });
-    const minViewsInput=document.getElementById('minViews');
-    function applyMinViews(){
-      const val=parseInt(minViewsInput.value,10);
-      if(!Number.isInteger(val)||val<=0){currentMinViews=1000000;minViewsInput.value=1000000;}
-      else currentMinViews=val;
-      fetchShorts();
-    }
-    minViewsInput.addEventListener('blur',applyMinViews);
 }
 
 // ─── Server ───────────────────────────────────────────────────────────────────
@@ -1234,12 +1665,43 @@ export function startServer() {
       res.end(readFileSync(join(dir, 'client.js'), 'utf-8'));
     } else if (req.method === 'GET' && urlPath === '/api/shorts') {
       await handleApiShorts(req, res);
+    } else if (req.method === 'GET' && urlPath === '/api/stats') {
+      await handleStatsApi(req, res);
     } else if (urlPath === '/api/saved') {
       await handleSavedApi(req, res);
     } else if (req.method === 'GET' && urlPath === '/api/audio') {
       await handleAudioApi(req, res);
     } else if (req.method === 'GET' && urlPath === '/api/lookup') {
       await handleLookupApi(req, res);
+    } else if (req.method === 'GET' && urlPath === '/api/credits') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      const credits = loadKeyCredits();
+      const keyList = Object.keys(credits).filter(k => k !== '_resetInfo');
+      const allKeysStatus = keyList.map((k, idx) => ({
+        index: idx + 1,
+        credits: credits[k] || 10000,
+        key: k.substring(0, 10) + '...'
+      }));
+      const totalCredits = allKeysStatus.reduce((sum, k) => sum + k.credits, 0);
+      res.end(JSON.stringify({ keys: allKeysStatus, total: totalCredits, resetDate: 'Mezzanotte UTC (ogni notte)' }));
+    } else if (req.method === 'GET' && urlPath === '/api/credits-cost') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      const channels = loadChannels();
+      const cost = estimateCreditsForFetch(channels.length);
+      res.end(JSON.stringify({ 
+        channelCount: channels.length,
+        estimatedCostPerSearch: cost,
+        sessionUsed: sessionCreditsUsed,
+        cacheValidityMinutes: 60,
+        costBreakdown: {
+          '💾 Risolvi canali': `${cost.resolveChannels} crediti (1 per canale)`,
+          '📚 Playlist uploads': `${cost.uploadsPlaylists} crediti (1 per canale)`,
+          '📄 Pagine playlist': `${cost.playlistItems} crediti (dipende dai giorni richiesti)`,
+          '📊 Statistiche': `${cost.stats} crediti (1 ogni 50 video)`,
+          '✅ TOTALE': `${cost.total} crediti per ricerca completa`,
+          '📌 Strategie': 'Il cache viene riusato solo se copre abbastanza giorni per il filtro richiesto'
+        }
+      }));
     } else {
       res.writeHead(404); res.end('Not Found');
     }
@@ -1250,7 +1712,18 @@ export function startServer() {
   });
   const PORT = process.env.PORT || 3000;
   const HOST = process.env.HOST || (process.env.RAILWAY_ENVIRONMENT ? '0.0.0.0' : '127.0.0.1');
+  
+  // Controlla e resetta crediti ogni minuto a mezzanotte UTC
+  setInterval(checkAndResetCreditsIfMidnight, 60000);
+  checkAndResetCreditsIfMidnight(); // Controlla subito all'avvio
+  
   server.listen(PORT, HOST, () => {
+    try {
+      const channels = loadChannels();
+      console.log(`📺 ${channels.length} canali caricati e tracciati`);
+    } catch (e) {
+      console.log('Errore nel caricamento canali');
+    }
     console.log(`Server avviato su http://${HOST}:${PORT}`);
     if (!process.env.RAILWAY_ENVIRONMENT) {
       const cmd = process.platform === 'win32' ? `start http://localhost:${PORT}` : process.platform === 'darwin' ? `open http://localhost:${PORT}` : `xdg-open http://localhost:${PORT}`;
